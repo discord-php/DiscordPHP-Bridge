@@ -22,7 +22,7 @@ final class ComponentRouterTest extends TestCase
     {
         $id = ComponentRouter::id('unlink', '123456789012345678');
 
-        $this->assertSame('tg:unlink:123456789012345678', $id);
+        $this->assertSame('bridge:unlink:123456789012345678', $id);
         $this->assertSame(
             ['action' => 'unlink', 'args' => ['123456789012345678']],
             ComponentRouter::parse($id),
@@ -48,7 +48,7 @@ final class ComponentRouterTest extends TestCase
         $this->assertNull(ComponentRouter::parse('unlink'));
         $this->assertNull(ComponentRouter::parse(''));
         $this->assertNull(ComponentRouter::parse(null));
-        $this->assertNull(ComponentRouter::parse('tg:'));
+        $this->assertNull(ComponentRouter::parse('bridge:'));
     }
 
     public function testASeparatorInAnArgumentIsRejectedWhenTheIdIsBuilt(): void

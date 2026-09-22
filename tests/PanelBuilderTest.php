@@ -15,6 +15,7 @@ namespace Bridge\Tests;
 
 use Bridge\Builders\PanelBuilder;
 use Bridge\Helpers\ComponentRouter;
+use Bridge\Room;
 use Discord\Builders\Components\Button;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Message;
@@ -91,7 +92,7 @@ final class PanelBuilderTest extends TestCase
 
     public function testAnEmptyLinkListExplainsHowToStartOne(): void
     {
-        $text = $this->container(PanelBuilder::links([]))['components'][0]['content'];
+        $text = $this->container(PanelBuilder::links([], 'telegram'))['components'][0]['content'];
 
         $this->assertStringContainsString('/telegram link', $text);
         $this->assertStringContainsString('/telegram here', $text);
@@ -100,8 +101,8 @@ final class PanelBuilderTest extends TestCase
     public function testEachBridgeRowCarriesItsOwnUnlinkButton(): void
     {
         $panel = PanelBuilder::links([
-            ['channel_id' => '111', 'chat_id' => '-1001', 'title' => 'My Group'],
-            ['channel_id' => '222', 'chat_id' => '-1002', 'title' => null],
+            ['channel_id' => '111', 'target' => '-1001', 'title' => 'My Group'],
+            ['channel_id' => '222', 'target' => '-1002', 'title' => null],
         ]);
 
         $sections = array_values(array_filter(
@@ -113,8 +114,8 @@ final class PanelBuilderTest extends TestCase
         $this->assertStringContainsString('<#111>', $sections[0]['components'][0]['content']);
         $this->assertStringContainsString('My Group', $sections[0]['components'][0]['content']);
         $this->assertSame(self::TYPE_BUTTON, $sections[0]['accessory']['type']);
-        $this->assertSame('tg:unlink:111', $sections[0]['accessory']['custom_id']);
-        $this->assertSame('tg:unlink:222', $sections[1]['accessory']['custom_id']);
+        $this->assertSame('bridge:unlink:111', $sections[0]['accessory']['custom_id']);
+        $this->assertSame('bridge:unlink:222', $sections[1]['accessory']['custom_id']);
 
         // A chat with no remembered title still has to be identifiable.
         $this->assertStringContainsString('-1002', $sections[1]['components'][0]['content']);
@@ -122,7 +123,7 @@ final class PanelBuilderTest extends TestCase
 
     public function testATitleCannotStyleThePanelItIsShownIn(): void
     {
-        $panel = PanelBuilder::links([['channel_id' => '111', 'chat_id' => '-1001', 'title' => '**boom**']]);
+        $panel = PanelBuilder::links([['channel_id' => '111', 'target' => '-1001', 'title' => '**boom**']]);
 
         $sections = array_values(array_filter(
             $this->container($panel)['components'],
@@ -137,7 +138,7 @@ final class PanelBuilderTest extends TestCase
     {
         $rows = [];
         for ($i = 0; $i < PanelBuilder::MAX_ROWS + 3; $i++) {
-            $rows[] = ['channel_id' => (string) $i, 'chat_id' => '-100' . $i, 'title' => null];
+            $rows[] = ['channel_id' => (string) $i, 'target' => '-100' . $i, 'title' => null];
         }
 
         $components = $this->container(PanelBuilder::links($rows))['components'];
@@ -147,17 +148,19 @@ final class PanelBuilderTest extends TestCase
         $this->assertStringContainsString('and 3 more', end($components)['content']);
     }
 
-    public function testTheChatPanelShowsWhatTheBotCanSeeAndWhatItCanDo(): void
+    public function testTheRoomPanelShowsWhatTheBotCanSeeAndWhatItCanDo(): void
     {
-        $panel = PanelBuilder::chat([
-            'title' => 'My Group',
-            'type' => 'supergroup',
-            'chat_id' => '-1001',
-            'members' => 1234,
-            'description' => 'A group about things',
-            'username' => 'mygroup',
-            'linked_channels' => ['111', '222'],
-        ]);
+        $panel = PanelBuilder::room(
+            new Room(
+                id: '-1001',
+                label: 'My Group',
+                url: 'https://t.me/mygroup',
+                kind: 'supergroup',
+                members: 1234,
+                description: 'A group about things',
+            ),
+            ['111', '222'],
+        );
 
         $components = $this->container($panel)['components'];
         $text = $components[0]['content'];
@@ -170,26 +173,25 @@ final class PanelBuilderTest extends TestCase
         $this->assertStringContainsString('<#111>', $text);
 
         $buttons = array_column(end($components)['components'], 'custom_id');
-        $this->assertSame(['tg:chat:-1001', 'tg:invite:-1001', 'tg:members:-1001'], $buttons);
+        $this->assertSame(['bridge:room:-1001', 'bridge:invite:-1001', 'bridge:members:-1001'], $buttons);
     }
 
-    public function testTheChatPanelCopesWithAChatItKnowsLittleAbout(): void
+    public function testTheRoomPanelCopesWithOneItKnowsLittleAbout(): void
     {
-        $text = $this->container(PanelBuilder::chat([
-            'title' => 'Private chat',
-            'type' => 'private',
-            'chat_id' => '4242',
-        ]))['components'][0]['content'];
+        // Every field but the id and a name is optional, because what a network
+        // will cheaply answer differs from network to network.
+        $text = $this->container(PanelBuilder::room(new Room('4242', 'Private chat', kind: 'private')))
+            ['components'][0]['content'];
 
         $this->assertStringContainsString('Not bridged to any channel here.', $text);
         $this->assertStringNotContainsString('member', $text);
     }
 
-    public function testTheChatPanelNeverCarriesAThumbnail(): void
+    public function testTheRoomPanelNeverCarriesAThumbnail(): void
     {
-        // A chat photo is only reachable through a URL containing the bot
-        // token, so the panel must not try to show one.
-        $json = (string) json_encode(PanelBuilder::chat(['title' => 'g', 'type' => 'group', 'chat_id' => '-1']));
+        // On at least one network a room photo is reachable only through a URL
+        // containing the bot token, so the panel must not try to show one.
+        $json = (string) json_encode(PanelBuilder::room(new Room('-1', 'g', kind: 'group')));
 
         $this->assertStringNotContainsString('"type":11', $json);
         $this->assertStringNotContainsString('thumbnail', $json);
@@ -202,9 +204,9 @@ final class PanelBuilderTest extends TestCase
         $buttons = end($components)['components'];
 
         $this->assertSame(PanelBuilder::DANGER, $this->container($panel)['accent_color']);
-        $this->assertSame('tg:reset', $buttons[0]['custom_id']);
+        $this->assertSame('bridge:reset', $buttons[0]['custom_id']);
         $this->assertSame('Clear them all', $buttons[0]['label']);
-        $this->assertSame('tg:dismiss', $buttons[1]['custom_id']);
+        $this->assertSame('bridge:dismiss', $buttons[1]['custom_id']);
     }
 
     /** @return array<string, mixed> */

@@ -37,7 +37,7 @@ use React\Promise\PromiseInterface;
 final class ComponentRouter
 {
     /** Marks a component as ours. */
-    public const PREFIX = 'tg';
+    public const PREFIX = 'bridge';
 
     /** Discord's hard limit on a `custom_id`. */
     public const ID_LIMIT = 100;

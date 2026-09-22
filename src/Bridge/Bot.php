@@ -15,6 +15,7 @@ namespace Bridge;
 
 use Bridge\Actions\BridgeActions;
 use Bridge\Actions\CoreActions;
+use Bridge\Builders\PanelBuilder;
 use Bridge\Capability\ProvidesActions;
 use Bridge\Capability\ProvidesModules;
 use Bridge\Command\ActionRegistry;
@@ -29,7 +30,9 @@ use Bridge\Support\BridgeCheck;
 use Bridge\Support\CommandSync;
 use Discord\MessageCommandClient;
 use Discord\Parts\Channel\Channel;
+use Discord\Parts\Interactions\Interaction;
 use Discord\Repository\Interaction\GlobalCommandRepository;
+use Discord\WebSockets\Event as DiscordEvent;
 use Discord\WebSockets\Intents;
 
 use function React\Promise\all;
@@ -130,6 +133,19 @@ class Bot extends MessageCommandClient
         // claim. Registered first so a connector that tried would collide here
         // rather than silently shadowing them.
         $this->actions->addAll(new CoreActions());
+
+        // Components v2 buttons all come back as one INTERACTION_CREATE, and
+        // every one of them carries what it means in its custom_id — so there
+        // is one listener rather than one per button, and a panel posted by a
+        // build that has since restarted still works.
+        $this->on(DiscordEvent::INTERACTION_CREATE, function (Interaction $interaction): void {
+            $this->components->dispatch($interaction);
+        });
+
+        // Every panel that offers a way out offers this one.
+        $this->components->on('dismiss', static fn (Interaction $interaction) => $interaction->updateMessage(
+            PanelBuilder::notice('Cancelled.'),
+        ));
 
         $this->addStartupWarnings('bridge configuration', $store->warnings());
 

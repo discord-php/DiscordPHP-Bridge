@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace Bridge\Builders;
 
 use Bridge\Helpers\ComponentRouter;
+use Bridge\Room;
 use Bridge\Support\MessageText;
 use Discord\Builders\Components\ActionRow;
 use Discord\Builders\Components\Button;
@@ -42,9 +43,9 @@ use Discord\Builders\MessageBuilder;
  * which forbids `content` on the same message — so everything a panel says
  * lives in a {@see TextDisplay}.
  *
- * Every panel also sets `allowed_mentions: none`. Panels quote
- * Telegram-supplied text — a chat title, a user's name — and none of it should
- * be able to ping a Discord server.
+ * Every panel also sets `allowed_mentions: none`. Panels quote text supplied
+ * by another network — a room title, somebody's name — and none of it should be
+ * able to ping a Discord server.
  *
  * @since 1.0.0
  *
@@ -52,7 +53,7 @@ use Discord\Builders\MessageBuilder;
  */
 class PanelBuilder extends MessageBuilder
 {
-    /** Telegram's blue, for ordinary panels. */
+    /** A calm blue, for ordinary panels. */
     public const ACCENT = 0x2AABEE;
 
     public const SUCCESS = 0x57F287;
@@ -112,16 +113,18 @@ class PanelBuilder extends MessageBuilder
      * This server's bridges, one row per link, each with its own Unlink
      * button — the reason these panels are v2 and not embeds.
      *
-     * @param list<array{channel_id: string, chat_id: string, title: ?string}> $rows
+     * @param list<array{channel_id: string, target: string, title: ?string}> $rows
+     * @param string $connector Named in the empty state, so the instruction it
+     *                          gives is one the reader can actually type.
      */
-    public static function links(array $rows): static
+    public static function links(array $rows, string $connector = 'bridge'): static
     {
         if ($rows === []) {
-            return static::notice(
+            return static::notice(sprintf(
                 "**No channels are bridged yet.**\n"
-                . 'Use `/telegram link channel:#general chat:-1001234567890` to start one, '
-                . 'or `/telegram here` in the channel you want bridged.',
-            );
+                . 'Use `/%1$s link` to start one, or `/%1$s here` in the channel you want bridged.',
+                $connector,
+            ));
         }
 
         $panel = static::new()
@@ -133,8 +136,8 @@ class PanelBuilder extends MessageBuilder
                 sprintf(
                     "<#%s> ⇄ **%s**\n-# `%s`",
                     $row['channel_id'],
-                    MessageText::escapeMarkdown($row['title'] ?? $row['chat_id']),
-                    $row['chat_id'],
+                    MessageText::escapeMarkdown($row['title'] ?? $row['target']),
+                    $row['target'],
                 ),
                 Button::danger(ComponentRouter::id('unlink', $row['channel_id']))->setLabel('Unlink'),
             );
@@ -149,59 +152,56 @@ class PanelBuilder extends MessageBuilder
     }
 
     /**
-     * The panel for one Telegram chat: what the bot can see about it, and the
-     * things it can do to it from here.
+     * The panel for one room on another network: what the bot can see about
+     * it, and the things it can do to it from here.
      *
-     * There is deliberately no thumbnail. A chat's photo is only reachable
-     * through a URL containing the bot token, which must never be posted into
-     * Discord — see {@see \Bridge\Helpers\Media}.
+     * There is deliberately no thumbnail. On at least one network a room's
+     * photo is reachable only through a URL containing the bot token, and a
+     * panel is not the place to find that out — so the builder does not offer
+     * the option at all.
      *
-     * @param array{title: string, type: string, chat_id: string, members?: ?int, description?: ?string, username?: ?string, linked_channels?: list<string>} $info
+     * @param list<string> $linkedChannels Discord channels bridged to it, for the footer.
      */
-    public static function chat(array $info): static
+    public static function room(Room $room, array $linkedChannels = []): static
     {
         $lines = [
-            '## ' . MessageText::escapeMarkdown($info['title']),
-            sprintf('-# %s · `%s`', MessageText::escapeMarkdown($info['type']), $info['chat_id']),
+            '## ' . MessageText::escapeMarkdown($room->label),
+            sprintf('-# %s · `%s`', MessageText::escapeMarkdown($room->kind ?? 'room'), $room->id),
         ];
 
-        if (($info['username'] ?? null) !== null && $info['username'] !== '') {
-            $lines[] = sprintf('🔗 https://t.me/%s', ltrim((string) $info['username'], '@'));
+        if ($room->url !== null && $room->url !== '') {
+            $lines[] = '🔗 ' . $room->url;
         }
 
-        if (($info['members'] ?? null) !== null) {
-            $members = (int) $info['members'];
-            $lines[] = sprintf('👥 **%s** member%s', number_format($members), $members === 1 ? '' : 's');
+        if ($room->members !== null) {
+            $lines[] = sprintf('👥 **%s** member%s', number_format($room->members), $room->members === 1 ? '' : 's');
         }
 
-        if (($info['description'] ?? null) !== null && $info['description'] !== '') {
+        if ($room->description !== null && $room->description !== '') {
             $lines[] = '';
-            $lines[] = '> ' . str_replace("\n", "\n> ", MessageText::escapeMarkdown(MessageText::truncate((string) $info['description'], 400)));
+            $lines[] = '> ' . str_replace("\n", "\n> ", MessageText::escapeMarkdown(MessageText::truncate($room->description, 400)));
         }
 
-        $bridged = $info['linked_channels'] ?? [];
         $lines[] = '';
-        $lines[] = $bridged === []
+        $lines[] = $linkedChannels === []
             ? '-# Not bridged to any channel here.'
-            : '-# Bridged to ' . implode(', ', array_map(static fn (string $id): string => '<#' . $id . '>', $bridged));
-
-        $chatId = $info['chat_id'];
+            : '-# Bridged to ' . implode(', ', array_map(static fn (string $id): string => '<#' . $id . '>', $linkedChannels));
 
         return static::new()
             ->addText(implode("\n", $lines))
             ->addSeparator()
             ->addActions(
-                Button::secondary(ComponentRouter::id('chat', $chatId))->setLabel('Refresh')->setEmoji('🔄'),
-                Button::secondary(ComponentRouter::id('invite', $chatId))->setLabel('Invite link')->setEmoji('🔗'),
-                Button::secondary(ComponentRouter::id('members', $chatId))->setLabel('Member count')->setEmoji('👥'),
+                Button::secondary(ComponentRouter::id('room', $room->id))->setLabel('Refresh')->setEmoji('🔄'),
+                Button::secondary(ComponentRouter::id('invite', $room->id))->setLabel('Invite link')->setEmoji('🔗'),
+                Button::secondary(ComponentRouter::id('members', $room->id))->setLabel('Member count')->setEmoji('👥'),
             );
     }
 
     /**
      * A destructive action behind a second press.
      *
-     * `/telegram reset` drops every bridge in the server, which is exactly the
-     * kind of thing someone fires while meaning `/telegram list`.
+     * `reset` drops every bridge in the server, which is exactly the kind of
+     * thing somebody fires while meaning `list`.
      */
     public static function confirm(string $markdown, string $confirmCustomId, string $confirmLabel = 'Yes, do it'): static
     {

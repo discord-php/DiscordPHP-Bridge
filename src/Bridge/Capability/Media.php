@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace Bridge\Capability;
 
 use Bridge\Message\Media as Attachment;
+use Bridge\Message\Outgoing;
 use React\Promise\PromiseInterface;
 
 /**
@@ -29,10 +30,18 @@ use React\Promise\PromiseInterface;
 interface Media
 {
     /**
-     * Sends a picture or file into a room, with optional text alongside it.
+     * Sends a picture or file into a room.
+     *
+     * The whole {@see Outgoing} comes with it rather than a finished caption,
+     * because composing one is the connector's business: the caption limit is
+     * not the message limit on any network that has both, and the escaping is
+     * the connector's own.
      *
      * Rejects when the network will not take it — too large, wrong type, a link
-     * it cannot reach — and the caller falls back to relaying it as a link.
+     * it cannot reach — and the relay falls back to sending it as a link in the
+     * text, which every network can carry.
+     *
+     * @return PromiseInterface<?string> The id of what was sent, when the network has them.
      */
-    public function sendMedia(string $target, Attachment $media, ?string $caption = null): PromiseInterface;
+    public function sendMedia(string $target, Attachment $media, ?Outgoing $message = null): PromiseInterface;
 }

@@ -27,6 +27,9 @@ final class SlashOption
     public const BOOLEAN = DiscordOption::BOOLEAN;
     public const USER = DiscordOption::USER;
     public const CHANNEL = DiscordOption::CHANNEL;
+    public const ROLE = DiscordOption::ROLE;
+    public const ATTACHMENT = DiscordOption::ATTACHMENT;
+    public const NUMBER = DiscordOption::NUMBER;
 
     public function __construct(
         public readonly string $name,
@@ -58,6 +61,9 @@ final class SlashOption
         return match ($this->type) {
             self::CHANNEL => '<#' . $value . '>',
             self::USER => '<@' . $value . '>',
+            self::ROLE => '<@&' . $value . '>',
+            // An attachment arrives as an id; the file itself is in the
+            // interaction's resolved data, which is the only place it exists.
             default => (string) $value,
         };
     }

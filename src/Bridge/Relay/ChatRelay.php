@@ -15,6 +15,7 @@ namespace Bridge\Relay;
 
 use Bridge\Bot;
 use Bridge\Capability\Editing;
+use Bridge\Capability\Media as CanSendMedia;
 use Bridge\Connector;
 use Bridge\Message\Incoming;
 use Bridge\Message\Media;
@@ -137,7 +138,27 @@ final class ChatRelay
 
     private function relayTo(Connector $connector, string $target, Outgoing $outgoing): void
     {
-        $connector->relay($target, $outgoing)->then(
+        $photo = $this->photoFor($connector, $outgoing);
+
+        // A network that can carry the picture should, because then it is
+        // actually there — a relayed link to Discord's CDN expires in about a
+        // day, so it is dead by the time anyone reads the logs.
+        $send = $photo === null
+            ? $connector->relay($target, $outgoing)
+            : $connector->sendMedia($target, $photo, $outgoing)->then(
+                null,
+                function (\Throwable $e) use ($connector, $target, $outgoing) {
+                    $this->bot->getLogger()->debug(sprintf(
+                        '[relay] %s would not take the picture, sending it as a link: %s',
+                        $connector->name(),
+                        $e->getMessage(),
+                    ));
+
+                    return $connector->relay($target, $outgoing);
+                },
+            );
+
+        $send->then(
             function (?string $remoteId) use ($connector, $outgoing): void {
                 if ($remoteId !== null && $outgoing->sourceId !== null) {
                     $this->sent->remember($connector->name() . ':' . $outgoing->sourceId, $remoteId);
@@ -150,6 +171,29 @@ final class ChatRelay
                 $e->getMessage(),
             )),
         );
+    }
+
+    /**
+     * The one picture worth handing to the network itself, if there is one and
+     * the network can take it.
+     *
+     * Only the first: sending several means a media group, which is a different
+     * call on every network that has one, and mixing files with images is not
+     * something they agree on. The rest relay as links in the text.
+     */
+    private function photoFor(Connector $connector, Outgoing $outgoing): ?Media
+    {
+        if (! $connector instanceof CanSendMedia) {
+            return null;
+        }
+
+        foreach ($outgoing->media as $item) {
+            if ($item->isImage() && $item->url !== null && MessageText::isRelayableUrl($item->url)) {
+                return $item;
+            }
+        }
+
+        return null;
     }
 
     /**
