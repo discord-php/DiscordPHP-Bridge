@@ -5,7 +5,7 @@ declare(strict_types=1);
 /*
  * This file is a part of the DiscordPHP-Bridge project.
  *
- * Copyright (c) 2026-present Valithor Obsidion <valithor@valgorithms.com>
+ * Copyright (c) 2026-present Valithor Obsidion <valithor@discordphp.org>
  *
  * This file is subject to the MIT license that is bundled
  * with this source code in the LICENSE.md file.
@@ -36,7 +36,7 @@ use function React\Promise\resolve;
  * member's permissions, working out which room a Discord channel stands for,
  * and getting a reply back out without pinging the server.
  *
- * @author Valithor Obsidion <valithor@valgorithms.com>
+ * @author Valithor Obsidion <valithor@discordphp.org>
  */
 final class DiscordAdapter
 {

@@ -5,7 +5,7 @@ declare(strict_types=1);
 /*
  * This file is a part of the DiscordPHP-Bridge project.
  *
- * Copyright (c) 2026-present Valithor Obsidion <valithor@valgorithms.com>
+ * Copyright (c) 2026-present Valithor Obsidion <valithor@discordphp.org>
  *
  * This file is subject to the MIT license that is bundled
  * with this source code in the LICENSE.md file.
@@ -61,12 +61,12 @@ use function React\Promise\resolve;
  * traffic is additionally paced per destination channel by
  * {@see OutboundPacer}, leaving room for the commands somebody is waiting on.
  *
- * @author Valithor Obsidion <valithor@valgorithms.com>
+ * @author Valithor Obsidion <valithor@discordphp.org>
  */
 class Bot extends MessageCommandClient
 {
     /** Where this lives. Printed into chat, so it has to resolve. */
-    public const GITHUB = 'https://github.com/Valgorithms/DiscordPHP-Bridge';
+    public const GITHUB = 'https://github.com/discord-php/DiscordPHP-Bridge';
 
     /** MESSAGE_CONTENT is privileged; without it every relayed message is empty. */
     public const INTENTS = Intents::GUILDS | Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;

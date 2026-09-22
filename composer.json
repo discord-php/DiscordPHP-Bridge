@@ -1,5 +1,5 @@
 {
-    "name": "vzgcoders/discordphp-bridge",
+    "name": "discord-php/bridge",
     "description": "The platform-agnostic half of a Discord chat bridge: routing, persistence, one command catalogue served to every chat, and Components v2 panels. Platforms plug in as connectors.",
     "keywords": [
         "discord",
@@ -15,7 +15,7 @@
     "authors": [
         {
             "name": "Valithor Obsidion",
-            "email": "valithor@valgorithms.com"
+            "email": "valithor@discordphp.org"
         }
     ],
     "require": {
@@ -31,22 +31,6 @@
         "friendsofphp/php-cs-fixer": "^3.64",
         "phpunit/phpunit": "^11.0 || ^10.5"
     },
-    "repositories": [
-        {
-            "type": "path",
-            "url": "../DiscordPHP",
-            "options": {
-                "symlink": true
-            }
-        },
-        {
-            "type": "path",
-            "url": "../DiscordPHP-Http",
-            "options": {
-                "symlink": true
-            }
-        }
-    ],
     "autoload": {
         "psr-4": {
             "Bridge\\": "src/Bridge/"
@@ -65,5 +49,9 @@
     "prefer-stable": true,
     "config": {
         "sort-packages": true
+    },
+    "support": {
+        "issues": "https://github.com/discord-php/DiscordPHP-Bridge/issues",
+        "source": "https://github.com/discord-php/DiscordPHP-Bridge"
     }
 }

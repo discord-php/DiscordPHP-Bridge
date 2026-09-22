@@ -1,0 +1,36 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-lint:
+    name: PHPUnit and Lint
+    runs-on: ${{ matrix.os }}
+    if: "!contains(github.event.head_commit.message, 'no test')"
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is a first-class target: react/filesystem has no async
+        # backend there without ext-uv, and react/child-process throws
+        # outright, so "it works on Linux" is not the same as "it works".
+        os: [ubuntu-latest, windows-latest]
+        php: ['8.5', '8.4']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: zlib, mbstring
+          tools: composer, phplint
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+      - name: Run PHPUnit
+        run: vendor/bin/phpunit
+      - name: Run PHPLint
+        run: phplint
