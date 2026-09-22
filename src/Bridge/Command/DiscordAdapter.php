@@ -133,7 +133,7 @@ final class DiscordAdapter
         $this->contextFor($action, $message, $access, $arguments, ! $private)->then(
             function (Context $context) use ($action, $arguments, $message, $private): void {
                 $this->settle($action->run($context, $arguments))->then(
-                    fn (?string $reply) => $reply === null ? null : $this->deliver($message, $reply, $private),
+                    fn (string|MessageBuilder|null $reply) => $reply === null ? null : $this->deliver($message, $reply, $private),
                     fn (\Throwable $e) => $this->fail($message, $action, $e),
                 );
             },
@@ -199,17 +199,31 @@ final class DiscordAdapter
         );
     }
 
-    /** Normalises a handler's `string|null|PromiseInterface` into a promise. */
+    /**
+     * Normalises a handler's return into a promise of what to send.
+     *
+     * A handler may answer with a string or with a {@see MessageBuilder}, for
+     * the cases a sentence will not cover — a Components v2 panel, say. Both
+     * render on Discord, which is why an action that returns a builder must
+     * declare itself Discord-only.
+     *
+     * @return PromiseInterface<string|MessageBuilder|null>
+     */
     private function settle(mixed $result): PromiseInterface
     {
         if ($result instanceof PromiseInterface) {
-            return $result->then(static fn ($value) => $value === null ? null : (string) $value);
+            return $result->then(static fn ($value) => self::rendered($value));
         }
 
-        return resolve($result === null ? null : (string) $result);
+        return resolve(self::rendered($result));
     }
 
-    private function deliver(Message $message, string $reply, bool $private): void
+    private static function rendered(mixed $value): string|MessageBuilder|null
+    {
+        return $value === null || $value instanceof MessageBuilder ? $value : (string) $value;
+    }
+
+    private function deliver(Message $message, string|MessageBuilder $reply, bool $private): void
     {
         if (! $private) {
             $this->say($message, $reply);
@@ -223,7 +237,7 @@ final class DiscordAdapter
             return;
         }
 
-        $author->sendMessage($this->builder($reply))->then(
+        $author->sendMessage($reply instanceof MessageBuilder ? $reply : $this->builder($reply))->then(
             fn () => $this->say($message, 'sent you that in a DM — it contains something that should not be posted in a channel.'),
             fn () => $this->say($message, 'that answer contains a secret and your DMs are closed, so it has not been sent.'),
         );
@@ -248,11 +262,14 @@ final class DiscordAdapter
         $this->say($message, 'that did not work. The details are in the bot log.');
     }
 
-    private function say(Message $message, string $text): void
+    private function say(Message $message, string|MessageBuilder $text): void
     {
-        $message->reply($this->builder($text))->then(null, function (\Throwable $e): void {
-            $this->bot->getLogger()->debug('[discord] could not reply: ' . $e->getMessage());
-        });
+        $message->reply($text instanceof MessageBuilder ? $text : $this->builder($text))->then(
+            null,
+            function (\Throwable $e): void {
+                $this->bot->getLogger()->debug('[discord] could not reply: ' . $e->getMessage());
+            },
+        );
     }
 
     /** Every outbound message: clamped to Discord's limit, and pinging nobody. */

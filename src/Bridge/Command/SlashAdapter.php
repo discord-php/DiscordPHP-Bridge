@@ -372,7 +372,7 @@ final class SlashAdapter
         $interaction->acknowledgeWithResponse($ephemeral)->then(
             fn () => $this->contextFor($action, $interaction, $access, $arguments, ! $ephemeral)->then(
                 fn (Context $context) => $this->settle($action->run($context, $arguments))->then(
-                    fn (?string $reply) => $this->reply($interaction, $reply ?? 'Done.'),
+                    fn (string|MessageBuilder|null $reply) => $this->reply($interaction, $reply ?? 'Done.'),
                     fn (\Throwable $e) => $this->fail($interaction, $action, $e),
                 ),
                 fn (\Throwable $e) => $this->fail($interaction, $action, $e),
@@ -491,19 +491,36 @@ final class SlashAdapter
         );
     }
 
-    /** @return PromiseInterface<string|null> */
+    /**
+     * Normalises a handler's return into a promise of what to send.
+     *
+     * A handler may answer with a string, or with a {@see MessageBuilder} when
+     * a sentence will not do — a Components v2 panel with buttons that stay
+     * live, most obviously. A builder only renders here, so an action that
+     * returns one must declare itself Discord-only; a chat has nothing to do
+     * with it.
+     *
+     * @return PromiseInterface<string|MessageBuilder|null>
+     */
     private function settle(mixed $result): PromiseInterface
     {
         if ($result instanceof PromiseInterface) {
-            return $result->then(static fn ($value) => $value === null ? null : (string) $value);
+            return $result->then(static fn ($value) => self::rendered($value));
         }
 
-        return resolve($result === null ? null : (string) $result);
+        return resolve(self::rendered($result));
     }
 
-    private function reply(Interaction $interaction, string $text): void
+    private static function rendered(mixed $value): string|MessageBuilder|null
     {
-        $interaction->updateOriginalResponse($this->builder($text))->then(
+        return $value === null || $value instanceof MessageBuilder ? $value : (string) $value;
+    }
+
+    private function reply(Interaction $interaction, string|MessageBuilder $reply): void
+    {
+        $message = $reply instanceof MessageBuilder ? $reply : $this->builder($reply);
+
+        $interaction->updateOriginalResponse($message)->then(
             null,
             fn (\Throwable $e) => $this->bot->getLogger()->debug('[slash] could not reply: ' . $e->getMessage()),
         );
