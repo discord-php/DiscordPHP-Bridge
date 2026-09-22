@@ -13,17 +13,23 @@ declare(strict_types=1);
 
 namespace Bridge;
 
+use Bridge\Actions\BridgeActions;
+use Bridge\Actions\CoreActions;
 use Bridge\Capability\ProvidesActions;
 use Bridge\Capability\ProvidesModules;
 use Bridge\Command\ActionRegistry;
+use Bridge\Command\DiscordAdapter;
+use Bridge\Command\SlashAdapter;
 use Bridge\Helpers\ComponentRouter;
 use Bridge\Modules\Module;
 use Bridge\Relay\ChatRelay;
 use Bridge\Relay\OutboundPacer;
 use Bridge\Relay\WebhookDelivery;
 use Bridge\Support\BridgeCheck;
+use Bridge\Support\CommandSync;
 use Discord\MessageCommandClient;
 use Discord\Parts\Channel\Channel;
+use Discord\Repository\Interaction\GlobalCommandRepository;
 use Discord\WebSockets\Intents;
 
 use function React\Promise\all;
@@ -120,6 +126,11 @@ class Bot extends MessageCommandClient
         $this->components = new ComponentRouter();
         $this->pacer = new OutboundPacer($this->getLoop());
 
+        // The core's own commands, under the one qualifier no connector may
+        // claim. Registered first so a connector that tried would collide here
+        // rather than silently shadowing them.
+        $this->actions->addAll(new CoreActions());
+
         $this->addStartupWarnings('bridge configuration', $store->warnings());
 
         $this->once('init', fn () => $this->start());
@@ -142,8 +153,16 @@ class Bot extends MessageCommandClient
             throw new \LogicException("A connector named {$name} is already installed.");
         }
 
+        if ($name === CoreActions::QUALIFIER) {
+            throw new \LogicException(sprintf("'%s' is the core's own qualifier and cannot be a connector.", $name));
+        }
+
         $this->connectors[$name] = $connector;
         $connector->boot($this);
+
+        // Every connector gets link/here/unlink/list/status/reset, defined once
+        // so they cannot drift apart between networks.
+        $this->actions->addAll(new BridgeActions($connector));
 
         if ($connector instanceof ProvidesActions) {
             $this->actions->addFrom($connector, $name);
@@ -367,6 +386,12 @@ class Bot extends MessageCommandClient
         }
 
         ($starting === [] ? resolve([]) : all($starting))->then(function (array $up): void {
+            // The catalogue is complete once every connector has had its turn,
+            // so the adapters see all of it and publish one command per
+            // qualifier rather than one per connector boot.
+            (new DiscordAdapter($this, $this->actions))->register();
+            (new SlashAdapter($this, $this->actions))->register();
+
             $this->bootModules();
 
             $this->relay = new ChatRelay($this);
@@ -382,8 +407,65 @@ class Bot extends MessageCommandClient
                 count(array_filter($up)),
             ));
 
+            $this->pruneCommands($up === [] || ! in_array(false, $up, true));
             $this->reportRestoredBridges();
         });
+    }
+
+    /**
+     * Removes global commands this build no longer defines.
+     *
+     * Renaming a command is two operations and only one of them is obvious:
+     * publishing `/twitch` leaves the `/relay` it replaced sitting in every
+     * server's command list, pointing at a handler that is gone. That reads as
+     * a broken bot rather than a renamed one.
+     *
+     * Only ever run when **every** connector started. One that failed to boot
+     * never declared its commands, and pruning against an incomplete list would
+     * delete the working commands of whichever package happened to be unlucky —
+     * a far worse outcome than leaving a stale name for one restart.
+     */
+    private function pruneCommands(bool $everyConnectorStarted): void
+    {
+        if (! $everyConnectorStarted) {
+            $this->logger->info('[bridge] not removing stale commands: something did not start, so the list is incomplete');
+
+            return;
+        }
+
+        if ($this->application === null) {
+            return;
+        }
+
+        $this->application->commands->freshen()->then(
+            function (GlobalCommandRepository $repo): void {
+                $stale = CommandSync::stale($repo, $this->declaredCommands());
+
+                if ($stale === []) {
+                    $this->logger->debug('[bridge] no stale commands registered');
+
+                    return;
+                }
+
+                foreach ($stale as $name) {
+                    $command = $repo->get('name', $name);
+
+                    if ($command === null) {
+                        continue;
+                    }
+
+                    $repo->delete($command, 'no longer defined by this build')->then(
+                        fn () => $this->logger->info('[bridge] removed stale command /' . $name),
+                        fn (\Throwable $e) => $this->logger->error(
+                            '[bridge] could not remove stale command /' . $name . ': ' . $e->getMessage(),
+                        ),
+                    );
+                }
+            },
+            fn (\Throwable $e) => $this->logger->warning(
+                '[bridge] could not read registered commands, so none were removed: ' . $e->getMessage(),
+            ),
+        );
     }
 
     private function bootModules(): void

@@ -21,10 +21,11 @@ use PHPUnit\Framework\TestCase;
  * not republish one that only *looks* different because Discord echoed it back
  * with its own fields and defaults.
  *
- * Both halves matter here. This bot defines 33 slash commands, so republishing
- * all of them every boot is 33 rate-limited writes to say nothing; and a bot
- * that instead skips whatever is already registered would leave a command
- * frozen in the shape it had the first time it was published.
+ * Both halves matter. A bot with two connectors installed publishes a command
+ * tree two platforms wide, so republishing all of it every boot is a stack of
+ * rate-limited writes to say nothing; and one that instead skips whatever is
+ * already registered leaves each command frozen in the shape it had the first
+ * time it was published.
  */
 final class CommandSyncTest extends TestCase
 {
@@ -90,10 +91,10 @@ final class CommandSyncTest extends TestCase
 
     public function testANewSubCommandIsAChange(): void
     {
-        // The case the whole class exists for: `relay reset` added in code,
+        // The case the whole class exists for: `twitch reset` added in code,
         // never offered by Discord unless this returns true.
         $built = $this->built();
-        $built['options'][] = ['type' => 1, 'name' => 'reset', 'description' => 'Clear every relay on this server.'];
+        $built['options'][] = ['type' => 1, 'name' => 'reset', 'description' => 'Clear every bridge on this server.'];
 
         $this->assertTrue(CommandSync::differs($this->published(), $built));
     }
@@ -101,7 +102,7 @@ final class CommandSyncTest extends TestCase
     public function testARewordedDescriptionIsAChange(): void
     {
         $built = $this->built();
-        $built['description'] = 'Configure the Twitch relay. Manage Server only.';
+        $built['description'] = 'Bridge this server with Twitch. Manage Server only.';
 
         $this->assertTrue(CommandSync::differs($this->published(), $built));
     }
@@ -132,31 +133,76 @@ final class CommandSyncTest extends TestCase
         $this->assertFalse(CommandSync::differs((array) $published, $this->built()));
     }
 
+    // ── Removing what this build no longer defines ─────────────────────
+
+    public function testACommandThisBuildStillDefinesIsSpared(): void
+    {
+        $this->assertSame([], CommandSync::stale(
+            [['name' => 'twitch'], ['name' => 'telegram']],
+            ['twitch', 'telegram'],
+        ));
+    }
+
+    public function testACommandThatWasRenamedAwayIsReportedAsStale(): void
+    {
+        // Publishing /twitch leaves the /relay it replaced sitting in every
+        // server's command list, pointing at a handler that is gone.
+        $this->assertSame(['relay', 'title'], CommandSync::stale(
+            [['name' => 'twitch'], ['name' => 'relay'], ['name' => 'title']],
+            ['twitch'],
+        ));
+    }
+
+    public function testStalenessIgnoresCase(): void
+    {
+        $this->assertSame([], CommandSync::stale([['name' => 'Twitch']], ['twitch']));
+    }
+
+    public function testPublishedCommandsMayArriveAsObjects(): void
+    {
+        $published = [
+            json_decode((string) json_encode(['name' => 'relay'])),
+            json_decode((string) json_encode(['name' => 'twitch'])),
+        ];
+
+        $this->assertSame(['relay'], CommandSync::stale($published, ['twitch']));
+    }
+
+    public function testNothingDeclaredMeansEverythingIsStale(): void
+    {
+        // Which is exactly why the caller may only run this once every
+        // connector has started: an incomplete list would wipe the lot.
+        $this->assertSame(['telegram', 'twitch'], CommandSync::stale(
+            [['name' => 'twitch'], ['name' => 'telegram']],
+            [],
+        ));
+    }
+
     /** What Discord has: the same command, echoed back with its own fields. */
     private function published(): array
     {
         return $this->built() + ['id' => '1', 'application_id' => '2', 'version' => '3'];
     }
 
-    /** What this build defines: `relay`, as {@see \Bridge\Actions\RelayActions} declares it. */
+    /** What this build defines. */
     private function built(): array
     {
         return [
             'type' => 1,
-            'name' => 'relay',
-            'description' => 'Configure the Twitch chat relay for this server.',
+            'name' => 'twitch',
+            'description' => 'Bridge this server with Twitch.',
             'contexts' => [0],
             'integration_types' => [0],
             'nsfw' => false,
             'options' => [
-                ['type' => 1, 'name' => 'list', 'description' => 'Show every relay configured on this server.'],
+                ['type' => 1, 'name' => 'list', 'description' => 'Show every bridge configured on this server.'],
                 [
                     'type' => 1,
                     'name' => 'link',
-                    'description' => 'Relay a Discord channel with a Twitch channel.',
+                    'description' => 'Bridge a Discord channel with a Twitch channel.',
                     'options' => [
-                        ['type' => 3, 'name' => 'twitch', 'description' => 'The Twitch channel to follow.', 'required' => true],
-                        ['type' => 7, 'name' => 'channel', 'description' => 'The Discord channel to relay.', 'required' => false],
+                        ['type' => 3, 'name' => 'target', 'description' => 'The Twitch channel to follow.', 'required' => true],
+                        ['type' => 7, 'name' => 'channel', 'description' => 'The Discord channel to bridge.', 'required' => false],
                     ],
                 ],
             ],

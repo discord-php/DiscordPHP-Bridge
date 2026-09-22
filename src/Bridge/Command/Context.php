@@ -140,6 +140,43 @@ final class Context
         return (string) $this->target;
     }
 
+    /**
+     * The Discord server this was invoked in, or `null` in a DM or from
+     * another network's chat.
+     *
+     * Read off whatever the adapter passed — a `Message` and an `Interaction`
+     * both carry it under the same name — so an action does not have to know
+     * which one it got.
+     */
+    public function guildId(): ?string
+    {
+        $id = $this->message->guild_id ?? null;
+
+        return $id === null || (string) $id === '' ? null : (string) $id;
+    }
+
+    /** The Discord channel this was invoked in, or `null` when there isn't one. */
+    public function channelId(): ?string
+    {
+        $id = $this->message->channel_id ?? null;
+
+        return $id === null || (string) $id === '' ? null : (string) $id;
+    }
+
+    /**
+     * The guild, or a thrown explanation.
+     *
+     * Configuring a bridge decides which Discord channel gets copied into a
+     * public chat, so it is not something that can be done from a DM.
+     *
+     * @throws ActionError
+     */
+    public function requireGuild(): string
+    {
+        return $this->guildId()
+            ?? throw new ActionError('that only works inside a Discord server.');
+    }
+
     /** Whether the invoker is the bot operator. */
     public function isOwner(): bool
     {

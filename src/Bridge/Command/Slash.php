@@ -22,7 +22,12 @@ namespace Bridge\Command;
  * opts in by attaching one of these, and {@see SlashAdapter} turns it into the
  * real thing — reusing the same handler, unchanged.
  *
- * Actions without a spec are still reachable by prefix in both chats; they
+ * There is no sub-command list here, and deliberately so: an action *is* a
+ * leaf. Where it sits in the tree is its qualifier and group, and a command
+ * with children is something {@see SlashAdapter} assembles out of several
+ * actions rather than something one action declares.
+ *
+ * Actions without a spec are still reachable by prefix in every chat; they
  * simply do not appear in Discord's command menu.
  *
  * @author Valithor Obsidion <valithor@valgorithms.com>
@@ -30,24 +35,12 @@ namespace Bridge\Command;
 final class Slash
 {
     /**
-     * @param list<SlashOption>     $options     For a flat command.
-     * @param list<SlashSubcommand> $subcommands For one with sub-commands.
-     * @param bool                  $ephemeral   Whether the reply is shown only to the invoker.
+     * @param list<SlashOption> $options   This command's typed parameters.
+     * @param bool              $ephemeral Whether the reply is shown only to the invoker.
      */
     public function __construct(
         public readonly array $options = [],
-        public readonly array $subcommands = [],
         public readonly bool $ephemeral = false,
     ) {
-        if ($options !== [] && $subcommands !== []) {
-            // Discord rejects a command that mixes them, and it would be
-            // ambiguous here too: is the first token a sub-command or a value?
-            throw new \LogicException('A slash command has options or sub-commands, not both.');
-        }
-    }
-
-    public function hasSubcommands(): bool
-    {
-        return $this->subcommands !== [];
     }
 }

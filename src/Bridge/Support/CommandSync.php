@@ -76,6 +76,46 @@ final class CommandSync
     }
 
     /**
+     * The names Discord still has registered that this build no longer defines.
+     *
+     * Renaming a command is two operations, and only one of them is obvious.
+     * Publishing `/twitch` leaves the `/relay` it replaced sitting in every
+     * server's command list, pointing at a handler that no longer exists —
+     * which looks like a broken bot rather than a renamed one. So what is
+     * stale is worked out and deleted.
+     *
+     * The caller is expected to do this **only after every connector has
+     * started**. A connector that failed to boot never declared its commands,
+     * and pruning against an incomplete list would delete the working commands
+     * of whichever package happened to be unlucky.
+     *
+     * @param iterable<object|array<string, mixed>> $published What Discord has, as parts or payloads.
+     * @param list<string>                          $declared  Every top-level name this build defines.
+     *
+     * @return list<string>
+     */
+    public static function stale(iterable $published, array $declared): array
+    {
+        $keep = array_flip(array_map(strtolower(...), $declared));
+        $stale = [];
+
+        foreach ($published as $command) {
+            $payload = self::toArray($command);
+            $name = strtolower((string) ($payload['name'] ?? ''));
+
+            if ($name === '' || isset($keep[$name])) {
+                continue;
+            }
+
+            $stale[] = $name;
+        }
+
+        sort($stale, SORT_STRING);
+
+        return $stale;
+    }
+
+    /**
      * Reduces a command payload to the part worth comparing: known fields
      * only, defaults made explicit, ordering made irrelevant.
      *
