@@ -43,7 +43,15 @@ trait BuildsBot
         return new Bot(
             Config::fromEnvironment(Environment::fromArray($settings + ['DISCORD_TOKEN' => 'test.token.here']), $path),
             new Store($path, Filesystem::blocking()),
-            ['logger' => new NullLogger(), 'loop' => new ManualLoop()],
+            [
+                'logger' => new NullLogger(),
+                'loop' => new ManualLoop(),
+                // Nothing here resolves a name. Without this, DiscordPHP asks
+                // the host for its DNS servers, which on Windows means running
+                // `wmic` — gone from current Windows images, and react/dns
+                // then passes null to preg_match_all().
+                'dnsConfig' => '8.8.8.8',
+            ],
         );
     }
 
