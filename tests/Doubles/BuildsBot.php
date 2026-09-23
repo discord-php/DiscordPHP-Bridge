@@ -46,11 +46,13 @@ trait BuildsBot
             [
                 'logger' => new NullLogger(),
                 'loop' => new ManualLoop(),
-                // Nothing here resolves a name. Without this, DiscordPHP asks
-                // the host for its DNS servers, which on Windows means running
-                // `wmic` — gone from current Windows images, and react/dns
-                // then passes null to preg_match_all().
+                // Nothing here resolves a name. Without these, DiscordPHP and
+                // both of its socket connectors each ask the host for its DNS
+                // servers, which on Windows means running `wmic` — gone from
+                // current Windows images, and react/dns then passes null to
+                // preg_match_all(). `dnsConfig` does not reach the connectors.
                 'dnsConfig' => '8.8.8.8',
+                'socket_options' => ['dns' => '8.8.8.8'],
             ],
         );
     }
