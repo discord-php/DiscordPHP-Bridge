@@ -122,6 +122,22 @@ final class Action
         return implode(' ', $this->path());
     }
 
+    /**
+     * Whether this action takes an option by that name — in which case a
+     * value given for it is the action's own argument, not a request to act
+     * on some other room.
+     */
+    public function declaresOption(string $name): bool
+    {
+        foreach ($this->slash->options ?? [] as $option) {
+            if (strcasecmp($option->name, $name) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /** Whether this action is offered on `$surface` at all. */
     public function availableOn(Surface $surface): bool
     {

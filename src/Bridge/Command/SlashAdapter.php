@@ -486,13 +486,12 @@ final class SlashAdapter
             return resolve($base);
         }
 
-        $explicit = $arguments->named('target');
-
-        // A `channel:` option is a Discord channel picker, which renders as
-        // `<#id>` — that names where to bridge, not what to bridge with.
-        $target = $explicit !== null && ! str_starts_with($explicit, '<#')
-            ? $connector->normalise($explicit)
-            : $this->bot->getStore()->links($connector->name())->targetFor((string) ($interaction->channel_id ?? ''));
+        // Always the room this channel is bridged to. Discord only accepts the
+        // options a command declares, and the only `target` declared is
+        // `link`'s, which is the room to bridge with — that action's own
+        // argument, not a room to act on. There is deliberately no way to
+        // point a slash command at a room this server has not bridged.
+        $target = $this->bot->getStore()->links($connector->name())->targetFor((string) ($interaction->channel_id ?? ''));
 
         if ($target === null || $target === '') {
             return resolve($base);

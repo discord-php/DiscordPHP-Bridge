@@ -21,6 +21,7 @@ use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Message;
 use React\Promise\PromiseInterface;
 
+use function React\Promise\reject;
 use function React\Promise\resolve;
 
 /**
@@ -166,7 +167,8 @@ final class DiscordAdapter
      * a Telegram group.
      *
      * An explicit `channel=` or `target=` wins over the bridge, so a server
-     * that bridges one room can still ask about another without rewiring it.
+     * that bridges several rooms can reach any of them from one channel — but
+     * only rooms *this server* has bridged, unless the operator is asking.
      *
      * @return PromiseInterface<Context>
      */
@@ -196,22 +198,79 @@ final class DiscordAdapter
             return resolve($base);
         }
 
-        $explicit = $arguments->named('channel') ?? $arguments->named('target');
+        $links = $this->bot->getStore()->links($connector->name());
+        $override = $this->roomOverride($action, $arguments);
 
-        $target = $explicit !== null
-            ? $connector->normalise($explicit)
-            : $this->bot->getStore()->links($connector->name())->targetFor((string) $message->channel_id);
+        if ($override === null) {
+            $target = $links->targetFor((string) $message->channel_id);
 
-        if ($target === null || $target === '') {
-            return resolve($base);
+            if ($target === null || $target === '') {
+                return resolve($base);
+            }
+
+            return $connector->resolve($target)->then(
+                static fn (?Room $room): Context => $base->withTarget($target, $room?->apiId()),
+                // A lookup that failed still leaves a usable target; the action
+                // will fail on its own terms rather than on a name resolution.
+                static fn (): Context => $base->withTarget($target),
+            );
         }
 
-        return $connector->resolve($target)->then(
-            static fn (?Room $room): Context => $base->withTarget($target, $room?->apiId()),
-            // A lookup that failed still leaves a usable target; the action
-            // will fail on its own terms rather than on a name resolution.
-            static fn (): Context => $base->withTarget($target),
+        // Naming a room is a convenience for a server that bridges more than
+        // one — not a way around bridging. Without this check anyone could
+        // point `ban`, `raid` or `send` at any room the bot can reach, in any
+        // server the bot is in, and the link table would guard nothing.
+        $refused = new ActionError(sprintf(
+            '`%s` is not a %s room this server has bridged, so it cannot be acted on from here.',
+            mb_substr(trim($override), 0, 60),
+            $connector->label(),
+        ));
+        $named = $connector->normalise($override);
+
+        if ($named === null || $named === '') {
+            return reject($refused);
+        }
+
+        $guildId = (string) ($message->guild_id ?? '');
+        $bridgedHere = $guildId === '' ? [] : array_map(strval(...), array_values($links->forGuild($guildId)));
+
+        return $connector->resolve($named)->then(
+            static function (?Room $room) use ($base, $named, $bridgedHere, $access, $refused): Context {
+                // Compared by the id the room is stored under, which need not
+                // be what was typed: a Telegram `@name` is stored as its id.
+                $id = $room?->id ?? $named;
+
+                if ($access !== Access::Operator && ! in_array($id, $bridgedHere, true)) {
+                    throw $refused;
+                }
+
+                return $base->withTarget($id, $room?->apiId());
+            },
+            // Unverifiable is refused: it cannot be shown to be one of ours.
+            static fn (): never => throw $refused,
         );
+    }
+
+    /**
+     * The room somebody named in `channel=` or `target=`, when that is what it
+     * means.
+     *
+     * An action that declares an option by that name owns it: `link` takes a
+     * `target` because that is the room to bridge with, and `raid` a `channel`
+     * because that is who to raid. Anything else is a request to act on a room
+     * other than this channel's own.
+     */
+    private function roomOverride(Action $action, Arguments $arguments): ?string
+    {
+        foreach (['channel', 'target'] as $key) {
+            $value = $arguments->named($key);
+
+            if ($value !== null && ! $action->declaresOption($key)) {
+                return $value;
+            }
+        }
+
+        return null;
     }
 
     /**
