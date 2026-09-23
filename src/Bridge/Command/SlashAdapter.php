@@ -360,6 +360,19 @@ final class SlashAdapter
             return;
         }
 
+        $wait = $this->bot->cooldowns()->claim($action, 'discord:' . (string) ($interaction->user->id ?? ''));
+
+        if ($wait > 0) {
+            // An interaction must be answered or Discord shows it as failed, so
+            // unlike a chat this one says why rather than going quiet.
+            $interaction->respondWithMessage(
+                $this->builder(sprintf('Slow down — try that again in %ds.', $wait)),
+                true,
+            )->then(null, fn (\Throwable $e) => $this->logFailure($action, $e));
+
+            return;
+        }
+
         $spec = $action->slash;
         \assert($spec !== null);
 
@@ -486,7 +499,7 @@ final class SlashAdapter
         }
 
         return $connector->resolve($target)->then(
-            static fn (?Room $room): Context => $base->withTarget($target, $room?->id),
+            static fn (?Room $room): Context => $base->withTarget($target, $room?->apiId()),
             static fn (): Context => $base->withTarget($target),
         );
     }

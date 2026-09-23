@@ -35,13 +35,16 @@ final class Incoming
     /**
      * @param string       $target    The room it was said in, as {@see \Bridge\Links} keys them.
      * @param string       $author    A display name, already resolved.
-     * @param ?string      $authorId  The platform's own id for the author, for avatar lookups.
+     * @param ?string      $authorId  The platform's own id for the author.
      * @param ?string      $text      `null` when the message carried no text at all.
      * @param ?string      $id        The platform's message id, when it has one that can be edited.
      * @param ?string      $quoted    A reply's quoted text, already rendered for display.
      * @param list<Media>  $media     Pictures and files, in the order they were attached.
      * @param bool         $edited    Whether this is a revision of a message already relayed.
      * @param bool         $own       Whether the bot itself said it — the loop-prevention check.
+     * @param ?string      $handle    The author's login or username, where the network
+     *                                has one distinct from the display name — what an
+     *                                avatar lookup is keyed by.
      */
     public function __construct(
         public readonly string $target,
@@ -53,6 +56,7 @@ final class Incoming
         public readonly array $media = [],
         public readonly bool $edited = false,
         public readonly bool $own = false,
+        public readonly ?string $handle = null,
     ) {
     }
 

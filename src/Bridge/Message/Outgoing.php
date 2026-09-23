@@ -76,4 +76,25 @@ final class Outgoing
 
         return $urls;
     }
+
+    /**
+     * The same message without one attachment.
+     *
+     * For a network that sends a picture as a picture and the text as its
+     * caption: the caption should not then link to the very image it sits
+     * under.
+     */
+    public function withoutMedia(Media $sent): self
+    {
+        return new self(
+            $this->author,
+            $this->text,
+            $this->userNames,
+            $this->channelNames,
+            $this->roleNames,
+            array_values(array_filter($this->media, static fn (Media $m): bool => $m !== $sent)),
+            $this->sourceId,
+            $this->edited,
+        );
+    }
 }

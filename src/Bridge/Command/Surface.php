@@ -44,6 +44,7 @@ final class Surface
      * @param int    $limit    The longest message body the surface accepts.
      * @param bool   $markdown Whether it renders Discord-style markdown.
      * @param bool   $lines    Whether a message can contain a line break at all.
+     * @param string $prefix   What a command typed there starts with.
      */
     public function __construct(
         public readonly string $name,
@@ -51,12 +52,17 @@ final class Surface
         public readonly int $limit,
         public readonly bool $markdown = false,
         public readonly bool $lines = true,
+        public readonly string $prefix = '!',
     ) {
     }
 
-    public static function discord(): self
+    /**
+     * @param string $prefix What prefix commands start with; slash commands
+     *                       need none.
+     */
+    public static function discord(string $prefix = '!'): self
     {
-        return new self(self::DISCORD, 'Discord', MessageText::DISCORD_LIMIT, markdown: true);
+        return new self(self::DISCORD, 'Discord', MessageText::DISCORD_LIMIT, markdown: true, prefix: $prefix);
     }
 
     public function isDiscord(): bool

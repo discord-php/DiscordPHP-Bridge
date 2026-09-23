@@ -54,6 +54,16 @@ final class Store
     /** The shape this class writes. Anything older is migrated on load. */
     public const VERSION = 2;
 
+    /**
+     * Which connector a legacy file with a `titles` table belongs to.
+     *
+     * Only DiscordPHP-TelegramRelay ever wrote one, so its presence is how that
+     * bot's file is told apart from the Twitch bots'. Named here rather than
+     * guessed from the targets: a numeric Telegram chat id and an all-digit
+     * Twitch login look alike.
+     */
+    public const LEGACY_TITLED = 'telegram';
+
     private readonly JsonFile $file;
 
     /** @var array{version: int, links: array<string, array<string, array<string, string>>>, labels: array<string, array<string, string>>} */
@@ -225,6 +235,13 @@ final class Store
             return;
         }
 
+        // Only for a room something points at. Otherwise the save below would
+        // drop the label again as unused — and the next message from the same
+        // unbridged group would write the file again, and the next, forever.
+        if (! $this->links($connector)->isBridged($target)) {
+            return;
+        }
+
         $this->data['labels'][$connector][$target] = $label;
         $this->save();
     }
@@ -295,6 +312,23 @@ final class Store
     }
 
     /**
+     * Whether a `links` table is keyed by Discord guild id — the legacy shape —
+     * rather than by connector name.
+     *
+     * @param array<array-key, mixed> $links
+     */
+    private static function keyedByGuild(array $links): bool
+    {
+        foreach (array_keys($links) as $key) {
+            if (preg_match('/^\d{5,20}$/', (string) $key) !== 1) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Brings whatever was on disk up to the current shape, dropping what cannot
      * be understood and saying so.
      *
@@ -306,11 +340,23 @@ final class Store
         $clean = ['version' => self::VERSION, 'links' => [], 'labels' => []];
         $links = (array) ($data['links'] ?? []);
 
-        if ($links !== [] && ! isset($data['version'])) {
-            // Written by one of the single-platform bots: guild ids at the top
-            // level, no connector between. Everything in it belongs to the one
-            // connector that bot had.
-            $links = [$this->legacyConnector => $links];
+        // Written by one of the single-platform bots: guild ids at the top
+        // level, no connector between. Recognised by its *shape* rather than by
+        // a missing `version` alone — a current file somebody hand-edited the
+        // version out of is keyed by connector name, and wrapping that again
+        // would bury every bridge a level too deep.
+        if ($links !== [] && ! isset($data['version']) && self::keyedByGuild($links)) {
+            // The Telegram bot's file is the one that remembered chat titles;
+            // the Twitch bots' never did. Filing a Telegram file under Twitch
+            // would turn every group into a Twitch channel named after its id.
+            $legacy = isset($data['titles']) ? self::LEGACY_TITLED : $this->legacyConnector;
+
+            $links = [$legacy => $links];
+
+            if (isset($data['titles'])) {
+                $data['labels'] = [$legacy => (array) $data['titles']];
+            }
+
             $this->migrated = true;
         }
 

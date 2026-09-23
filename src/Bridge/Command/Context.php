@@ -14,6 +14,8 @@ declare(strict_types=1);
 namespace Bridge\Command;
 
 use Bridge\Bot;
+use Discord\Parts\Channel\Message;
+use Discord\Parts\Interactions\Interaction;
 
 /**
  * Everything an action knows about the invocation it is servicing: who asked,
@@ -150,14 +152,29 @@ final class Context
      */
     public function guildId(): ?string
     {
+        if (! $this->message instanceof Message && ! $this->message instanceof Interaction) {
+            return null;
+        }
+
         $id = $this->message->guild_id ?? null;
 
         return $id === null || (string) $id === '' ? null : (string) $id;
     }
 
-    /** The Discord channel this was invoked in, or `null` when there isn't one. */
+    /**
+     * The Discord channel this was invoked in, or `null` when it came from
+     * somewhere that is not Discord.
+     *
+     * Checked by type rather than read off whatever the adapter passed: a
+     * Twitch or Telegram message has a `channel` of its own, and mistaking one
+     * for a Discord channel id would bridge the wrong thing.
+     */
     public function channelId(): ?string
     {
+        if (! $this->message instanceof Message && ! $this->message instanceof Interaction) {
+            return null;
+        }
+
         $id = $this->message->channel_id ?? null;
 
         return $id === null || (string) $id === '' ? null : (string) $id;

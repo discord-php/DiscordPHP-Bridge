@@ -18,11 +18,11 @@ use Bridge\Room;
 use Bridge\Support\MessageText;
 use Discord\Builders\Components\ActionRow;
 use Discord\Builders\Components\Button;
-use Discord\Builders\Components\ComponentObject;
 use Discord\Builders\Components\Container;
 use Discord\Builders\Components\Section;
 use Discord\Builders\Components\Separator;
 use Discord\Builders\Components\TextDisplay;
+use Discord\Builders\Components\Thumbnail;
 use Discord\Builders\MessageBuilder;
 
 /**
@@ -229,8 +229,11 @@ class PanelBuilder extends MessageBuilder
         return $this;
     }
 
-    /** Adds a line of text with a component — usually a button — beside it. */
-    public function addRow(string $markdown, ComponentObject $accessory): static
+    /**
+     * Adds a line of text with a button or thumbnail beside it — the only two
+     * things a Section accepts as an accessory.
+     */
+    public function addRow(string $markdown, Button|Thumbnail $accessory): static
     {
         $this->container->addComponent(
             Section::new()

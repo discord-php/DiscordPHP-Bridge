@@ -125,6 +125,27 @@ final class OutboundPacerTest extends TestCase
         $this->assertSame('sent', $answer);
     }
 
+    public function testASendThatThrowsRejectsInsteadOfStallingTheQueue(): void
+    {
+        // A send that blows up before it has a promise to reject — a bad
+        // argument, a part missing a property — must still settle, or the
+        // caller waits forever and the channel's queue never drains.
+        $sent = [];
+        $error = null;
+        $pacer = $this->pacer();
+
+        $pacer->enqueue('c1', static function (): never {
+            throw new \RuntimeException('boom');
+        })->then(null, function (\Throwable $e) use (&$error): void {
+            $error = $e->getMessage();
+        });
+
+        $pacer->enqueue('c1', $this->recorder($sent, 'after'));
+
+        $this->assertSame('boom', $error);
+        $this->assertSame(['after'], $sent);
+    }
+
     private function pacer(): OutboundPacer
     {
         return new OutboundPacer(

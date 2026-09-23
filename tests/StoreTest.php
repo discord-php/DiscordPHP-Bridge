@@ -176,26 +176,72 @@ final class StoreTest extends TestCase
 
     public function testTheMigratedFileIsWrittenBackInTheCurrentShape(): void
     {
-        file_put_contents($this->path, (string) json_encode(['links' => ['g1' => ['c1' => 'x']]]));
+        file_put_contents($this->path, (string) json_encode(['links' => ['111111111111' => ['c1' => 'x']]]));
 
         $store = $this->store();
-        $store->link('twitch', 'g1', 'c2', 'y');
+        $store->link('twitch', '111111111111', 'c2', 'y');
         $store->flush();
 
         /** @var array<string, mixed> $written */
         $written = json_decode((string) file_get_contents($this->path), true);
 
         $this->assertSame(Store::VERSION, $written['version']);
-        $this->assertSame(['c1' => 'x', 'c2' => 'y'], $written['links']['twitch']['g1']);
+        $this->assertSame(['c1' => 'x', 'c2' => 'y'], $written['links']['twitch']['111111111111']);
     }
 
     public function testWhichConnectorAnOldFileBelongsToIsTheCallersToSay(): void
     {
-        file_put_contents($this->path, (string) json_encode(['links' => ['g1' => ['c1' => '-100']]]));
+        file_put_contents($this->path, (string) json_encode(['links' => ['111111111111' => ['c1' => '-100']]]));
 
         $store = new Store($this->path, Filesystem::blocking(), 'telegram');
 
         $this->assertSame(['telegram'], $store->connectors());
+    }
+
+    public function testTheTelegramBotsFileIsRecognisedByItsTitles(): void
+    {
+        // DiscordPHP-TelegramRelay's file, which the app never names as the
+        // legacy connector: the titles table is what gives it away.
+        file_put_contents($this->path, (string) json_encode([
+            'links' => ['111111111111' => ['222222222222' => '-1001234567890']],
+            'titles' => ['-1001234567890' => 'My Group'],
+        ]));
+
+        $store = $this->store();
+
+        $this->assertTrue($store->migrated());
+        $this->assertSame(['telegram'], $store->connectors());
+        $this->assertSame('-1001234567890', $store->links('telegram')->targetFor('222222222222'));
+        $this->assertSame('My Group', $store->label('telegram', '-1001234567890'));
+    }
+
+    public function testACurrentFileMissingItsVersionIsNotBuriedALevelDeeper(): void
+    {
+        // Keyed by connector name, so it is already the current shape: wrapping
+        // it under "twitch" would make "twitch" a guild id.
+        file_put_contents($this->path, (string) json_encode([
+            'links' => ['twitch' => ['111111111111' => ['222222222222' => 'coffeescrafts']]],
+        ]));
+
+        $store = $this->store();
+
+        $this->assertFalse($store->migrated());
+        $this->assertSame(['twitch'], $store->connectors());
+        $this->assertSame('coffeescrafts', $store->links('twitch')->targetFor('222222222222'));
+    }
+
+    public function testALabelForSomethingUnbridgedIsNotWritten(): void
+    {
+        $adapter = new DeferredAdapter();
+        $store = new Store($this->path, Filesystem::with($adapter, 'deferred'));
+
+        // Every message from an unbridged group names it; none of them should
+        // cost a write.
+        $store->rememberLabel('telegram', '-100', 'Somebody else');
+        $store->rememberLabel('telegram', '-100', 'Somebody else');
+
+        $this->assertNull($store->label('telegram', '-100'));
+        $this->assertSame(0, $adapter->pending());
     }
 
     public function testACurrentFileIsNotMigratedAgain(): void

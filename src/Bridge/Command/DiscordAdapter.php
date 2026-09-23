@@ -46,35 +46,42 @@ final class DiscordAdapter
     ) {
     }
 
-    /** Wires every Discord-available action into the command client. */
+    /**
+     * Wires every Discord-available action into the command client.
+     *
+     * One command per qualifier, and the rest of the line is resolved by
+     * {@see ActionRegistry::resolve()} rather than by registering each action as
+     * a sub-command. That is what lets both forms work — `!twitch title` as a
+     * chat would type it and `!twitch channel title` as the slash menu shows
+     * it — and it keeps aliases and cooldowns on the same path as every other
+     * surface instead of in DiscordPHP's own copy of them.
+     */
     public function register(): void
     {
-        foreach ($this->byQualifier() as $qualifier => $actions) {
-            $root = $this->bot->registerCommand(
+        foreach (array_keys($this->byQualifier()) as $qualifier) {
+            $this->bot->registerCommand(
                 $qualifier,
-                fn (Message $message) => $this->listUnder($message, $qualifier),
+                fn (Message $message, array $args) => $this->route($qualifier, $message, $args),
                 [
                     'description' => sprintf('Commands for %s.', $qualifier),
                     'usage' => '<command>',
                 ],
             );
-
-            foreach ($actions as $action) {
-                $root->registerSubCommand(
-                    $action->name,
-                    fn (Message $message, array $args) => $this->invoke($action, $message, $args),
-                    [
-                        'description' => $action->description !== '' ? $action->description : 'No description provided.',
-                        'usage' => $action->usage,
-                        'cooldown' => $action->cooldown,
-                    ],
-                );
-
-                foreach ($action->aliases as $alias) {
-                    $root->registerSubCommandAlias($alias, $action->name);
-                }
-            }
         }
+    }
+
+    /** Finds the action a line names, or lists what is under the qualifier. */
+    private function route(string $qualifier, Message $message, array $args): void
+    {
+        [$action, $rest] = $this->registry->resolve([$qualifier, ...array_map('strval', $args)]);
+
+        if ($action === null || ! $action->availableOn(Surface::discord())) {
+            $this->listUnder($message, $qualifier);
+
+            return;
+        }
+
+        $this->invoke($action, $message, $rest);
     }
 
     /**
@@ -119,6 +126,14 @@ final class DiscordAdapter
 
         if (! $access->satisfies($action->access)) {
             $this->say($message, sprintf('that command is limited to %s.', $action->access->label()));
+
+            return;
+        }
+
+        $wait = $this->bot->cooldowns()->claim($action, 'discord:' . (string) ($message->author->id ?? ''));
+
+        if ($wait > 0) {
+            $this->say($message, sprintf('slow down — try that again in %ds.', $wait));
 
             return;
         }
@@ -192,7 +207,7 @@ final class DiscordAdapter
         }
 
         return $connector->resolve($target)->then(
-            static fn (?Room $room): Context => $base->withTarget($target, $room?->id),
+            static fn (?Room $room): Context => $base->withTarget($target, $room?->apiId()),
             // A lookup that failed still leaves a usable target; the action
             // will fail on its own terms rather than on a name resolution.
             static fn (): Context => $base->withTarget($target),

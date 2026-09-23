@@ -133,7 +133,14 @@ final class OutboundPacer
             $limiter = $this->limiters[$item['channel']] ??= new RateLimiter($this->capacity, $this->per, $this->clock);
 
             if ($limiter->tryConsume()) {
-                $item['deferred']->resolve(($item['send'])());
+                // A send that throws rather than rejecting must not escape the
+                // loop: everything already set aside below would go with it,
+                // and those sends would simply never happen.
+                try {
+                    $item['deferred']->resolve(($item['send'])());
+                } catch (\Throwable $e) {
+                    $item['deferred']->reject($e);
+                }
 
                 continue;
             }

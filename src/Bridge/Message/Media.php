@@ -39,6 +39,8 @@ final class Media
      * @param ?string $id      The platform's own handle for it, for a connector that must re-fetch.
      * @param ?string $name    A filename to show.
      * @param ?string $caption Text the platform attached to the file rather than to the message.
+     * @param ?int    $size    In bytes, when the platform says — what decides whether it is
+     *                         small enough to copy across rather than describe.
      */
     public function __construct(
         public readonly string $kind = self::FILE,
@@ -46,6 +48,7 @@ final class Media
         public readonly ?string $id = null,
         public readonly ?string $name = null,
         public readonly ?string $caption = null,
+        public readonly ?int $size = null,
     ) {
     }
 

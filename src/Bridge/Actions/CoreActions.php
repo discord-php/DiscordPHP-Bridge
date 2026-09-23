@@ -92,12 +92,12 @@ final class CoreActions implements ProvidesActions
             }
 
             return $action->help(
-                $context->surface->isDiscord() ? '/' : $context->bot->getConfig()->discordPrefix,
+                $context->surface->isDiscord() ? '/' : $context->surface->prefix,
                 full: $context->surface->isDiscord(),
             );
         }
 
-        $prefix = $context->surface->isDiscord() ? '/' : $context->bot->getConfig()->discordPrefix;
+        $prefix = $context->surface->isDiscord() ? '/' : $context->surface->prefix;
         $lines = [];
 
         foreach ($context->bot->getActions()->grouped($context->surface, $context->access) as $heading => $actions) {
@@ -154,11 +154,11 @@ final class CoreActions implements ProvidesActions
         $fields = ['bridges' => $context->bot->getStore()->count()];
 
         foreach ($context->bot->connectors() as $name => $connector) {
-            $fields[$name] = sprintf(
-                '%d room(s), %d queued',
-                count($connector->joined()),
-                $connector->queued(),
-            );
+            // "0 rooms" from a connector that never started reads like a quiet
+            // one, which is exactly the confusion this command exists to clear.
+            $fields[$name] = $context->bot->isUp($name)
+                ? sprintf('%d room(s), %d queued', count($connector->joined()), $connector->queued())
+                : 'not connected';
         }
 
         $fields['discord queue'] = $context->bot->pacer()->queued();

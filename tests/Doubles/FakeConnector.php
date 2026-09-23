@@ -24,6 +24,7 @@ use Bridge\Message\Outgoing;
 use Bridge\Room;
 use React\Promise\PromiseInterface;
 
+use function React\Promise\reject;
 use function React\Promise\resolve;
 
 /**
@@ -48,6 +49,9 @@ final class FakeConnector implements Connector, ProvidesActions
     public bool $started = false;
 
     public bool $stopped = false;
+
+    /** Whether {@see start()} should reject, for testing a network that will not come up. */
+    public bool $failToStart = false;
 
     /** @var list<callable(Incoming): void> */
     private array $handlers = [];
@@ -76,16 +80,22 @@ final class FakeConnector implements Connector, ProvidesActions
 
     public function surface(): Surface
     {
-        return new Surface($this->name, $this->label, 500, markdown: false, lines: false);
+        return new Surface($this->name, $this->label, 500, markdown: false, lines: false, prefix: '!');
     }
 
     public function boot(Bot $bot): void
     {
     }
 
-    public function start(): void
+    public function start(): PromiseInterface
     {
+        if ($this->failToStart) {
+            return reject(new \RuntimeException('refused to start'));
+        }
+
         $this->started = true;
+
+        return resolve(true);
     }
 
     public function stop(): void

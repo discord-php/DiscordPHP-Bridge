@@ -14,8 +14,10 @@ declare(strict_types=1);
 namespace Bridge\Relay;
 
 use Bridge\Bot;
+use Bridge\Capability\Avatars;
 use Bridge\Capability\Editing;
 use Bridge\Capability\Media as CanSendMedia;
+use Bridge\Command\ChatDispatcher;
 use Bridge\Connector;
 use Bridge\Message\Incoming;
 use Bridge\Message\Media;
@@ -24,6 +26,10 @@ use Bridge\Support\MessageText;
 use Discord\Parts\Channel\Channel;
 use Discord\Parts\Channel\Message;
 use Discord\WebSockets\Event;
+use React\Promise\PromiseInterface;
+
+use function React\Promise\all;
+use function React\Promise\resolve;
 
 /**
  * The relay itself: Discord chat out to every connector, and every connector's
@@ -40,7 +46,22 @@ use Discord\WebSockets\Event;
  * several networks at once, and a single message from one network still fans
  * out to every Discord channel following that room, across unrelated servers.
  * Both directions are bounded — the first by how many connectors are installed,
- * the second by {@see OutboundPacer}.
+ * the second by {@see OutboundPacer}. A channel bridged to two networks also
+ * carries each network's chat to the other, directly, since the Discord copy
+ * of it is a webhook message and never relayed onward.
+ *
+ * ## Edits
+ *
+ * An edit is only ever applied as an edit. A network that cannot rewrite a
+ * message it sent — IRC — never hears about one, because the only alternative
+ * is posting the message a second time, and a second copy of everything
+ * somebody corrects a typo in is worse than the typo.
+ *
+ * That matters more than it sounds, because Discord calls a lot of things an
+ * edit. When a message containing a link is unfurled into an embed, Discord
+ * sends `MESSAGE_UPDATE` with the content unchanged. Treating that as an edit
+ * would relay every message with a link in it twice. So an update is acted on
+ * only when the text or the attachments actually changed.
  *
  * @author Valithor Obsidion <valithor@discordphp.org>
  */
@@ -49,14 +70,26 @@ final class ChatRelay
     /** How many relayed messages to remember for editing, per direction. */
     public const REMEMBER = 500;
 
+    /** @var MessageMap "connector:discordId" => the id it was given on that network */
     private readonly MessageMap $sent;
+
+    /** @var MessageMap "discordId" => fingerprint of what was relayed, to tell an edit from an unfurl */
+    private readonly MessageMap $seen;
+
+    /** @var MessageMap "connector:room:id" => list of Discord copies it became */
+    private readonly MessageMap $delivered;
+
+    /** @var array<string, ChatDispatcher> connector name => its command matcher */
+    private array $commands = [];
 
     public function __construct(private readonly Bot $bot, int $remember = self::REMEMBER)
     {
         $this->sent = new MessageMap($remember);
+        $this->seen = new MessageMap($remember);
+        $this->delivered = new MessageMap($remember);
     }
 
-    /** Attaches both directions. Call once, after the connectors are up. */
+    /** Attaches both directions. Call once; nothing arrives until a connector starts. */
     public function attach(): void
     {
         $this->bot->on('message', fn (Message $message) => $this->fromDiscord($message));
@@ -66,97 +99,91 @@ final class ChatRelay
         $this->bot->on(Event::MESSAGE_UPDATE, fn (object $message) => $this->fromDiscordEdit($message));
 
         foreach ($this->bot->connectors() as $connector) {
+            $this->commands[$connector->name()] = new ChatDispatcher($this->bot, $connector);
             $connector->onIncoming(fn (Incoming $incoming) => $this->fromConnector($connector, $incoming));
         }
     }
 
     // ── Discord → everywhere ───────────────────────────────────────────
 
-    private function fromDiscord(Message $message, bool $edited = false): void
+    private function fromDiscord(Message $message): void
     {
-        if (! $this->shouldRelayFromDiscord($message)) {
+        // Bridged at all, first. The maps below are bounded, and remembering
+        // every message in every channel would let one busy unbridged channel
+        // evict what the bridged ones need to follow an edit.
+        $bridged = $this->bridgedConnectors((string) $message->channel_id);
+
+        if ($bridged === [] || ! $this->shouldRelayFromDiscord($message)) {
             return;
         }
 
-        $channelId = (string) $message->channel_id;
-        $outgoing = $this->compose($message, $edited);
+        $outgoing = $this->compose($message, edited: false);
 
         if ($outgoing->isEmpty()) {
             return;
         }
 
-        foreach ($this->bot->connectors() as $name => $connector) {
-            $target = $this->bot->getStore()->links($name)->targetFor($channelId);
+        $this->seen->remember((string) $message->id, self::fingerprint($message));
 
-            if ($target === null) {
-                continue;
-            }
-
-            $edited && $this->editOnConnector($connector, $target, $outgoing)
-                ? null
-                : $this->relayTo($connector, $target, $outgoing);
+        foreach ($bridged as [$connector, $target]) {
+            $this->relayTo($connector, $target, $outgoing);
         }
-    }
-
-    private function fromDiscordEdit(object $message): void
-    {
-        if (! $message instanceof Message) {
-            // A partial update — an embed Discord unfurled, a pin, a flag
-            // change. There is no content here to relay, and guessing at one
-            // would relay an empty message over the top of a real one.
-            return;
-        }
-
-        $this->fromDiscord($message, edited: true);
     }
 
     /**
-     * Rewrites what this message became on a network that can edit, returning
-     * whether it managed to.
+     * An edit of something already relayed, and only that.
+     *
+     * Three things are not edits and are dropped: a partial update with no
+     * message part (a pin, a flag change), an update to a message this bot
+     * never relayed, and an update whose content did not change — which is
+     * what an unfurling link looks like.
      */
-    private function editOnConnector(Connector $connector, string $target, Outgoing $outgoing): bool
+    private function fromDiscordEdit(object $message): void
     {
-        if (! $connector instanceof Editing || $outgoing->sourceId === null) {
-            return false;
+        if (! $message instanceof Message || ! $this->shouldRelayFromDiscord($message)) {
+            return;
         }
 
-        $key = $connector->name() . ':' . $outgoing->sourceId;
-        $remoteId = $this->sent->lookup($key);
+        $id = (string) $message->id;
+        $before = $this->seen->lookup($id);
+        $now = self::fingerprint($message);
 
-        if ($remoteId === null) {
-            return false;
+        if ($before === null || $before === $now) {
+            return;
         }
 
-        $connector->relay($target, $outgoing)->then(null, function (\Throwable $e) use ($connector): void {
-            // Too old to edit, deleted, or refused. Leaving the original alone
-            // is better than posting a second copy of it.
-            $this->bot->getLogger()->debug(sprintf('[relay] %s edit failed: %s', $connector->name(), $e->getMessage()));
-        });
+        $this->seen->remember($id, $now);
+        $outgoing = $this->compose($message, edited: true);
 
-        return true;
+        foreach ($this->bridgedConnectors((string) $message->channel_id) as [$connector, $target]) {
+            if (! $connector instanceof Editing) {
+                continue;
+            }
+
+            $remoteId = $this->sent->lookup($connector->name() . ':' . $id);
+
+            if ($remoteId === null) {
+                continue;
+            }
+
+            $connector->edit($target, (string) $remoteId, $outgoing)->then(
+                null,
+                // Too old to edit, deleted, or refused. Leaving the original
+                // alone is better than posting a second copy of it.
+                fn (\Throwable $e) => $this->bot->getLogger()->debug(sprintf(
+                    '[relay] %s would not take an edit: %s',
+                    $connector->name(),
+                    $e->getMessage(),
+                )),
+            );
+        }
     }
 
     private function relayTo(Connector $connector, string $target, Outgoing $outgoing): void
     {
-        $photo = $this->photoFor($connector, $outgoing);
-
-        // A network that can carry the picture should, because then it is
-        // actually there — a relayed link to Discord's CDN expires in about a
-        // day, so it is dead by the time anyone reads the logs.
-        $send = $photo === null
-            ? $connector->relay($target, $outgoing)
-            : $connector->sendMedia($target, $photo, $outgoing)->then(
-                null,
-                function (\Throwable $e) use ($connector, $target, $outgoing) {
-                    $this->bot->getLogger()->debug(sprintf(
-                        '[relay] %s would not take the picture, sending it as a link: %s',
-                        $connector->name(),
-                        $e->getMessage(),
-                    ));
-
-                    return $connector->relay($target, $outgoing);
-                },
-            );
+        $send = $connector instanceof CanSendMedia && ($photo = $this->photoIn($outgoing)) !== null
+            ? $this->relayPhoto($connector, $target, $photo, $outgoing)
+            : $connector->relay($target, $outgoing);
 
         $send->then(
             function (?string $remoteId) use ($connector, $outgoing): void {
@@ -174,19 +201,40 @@ final class ChatRelay
     }
 
     /**
-     * The one picture worth handing to the network itself, if there is one and
-     * the network can take it.
+     * Hands the picture to a network that can carry it, and falls back to a
+     * link in the text when it will not take it.
+     *
+     * A network that can carry the picture should, because then it is actually
+     * there — a relayed link to Discord's CDN expires in about a day, so it is
+     * dead by the time anyone reads the logs.
+     *
+     * @return PromiseInterface<?string>
+     */
+    private function relayPhoto(CanSendMedia&Connector $connector, string $target, Media $photo, Outgoing $outgoing): PromiseInterface
+    {
+        return $connector->sendMedia($target, $photo, $outgoing)->then(
+            null,
+            function (\Throwable $e) use ($connector, $target, $outgoing): PromiseInterface {
+                $this->bot->getLogger()->debug(sprintf(
+                    '[relay] %s would not take the picture, sending it as a link: %s',
+                    $connector->name(),
+                    $e->getMessage(),
+                ));
+
+                return $connector->relay($target, $outgoing);
+            },
+        );
+    }
+
+    /**
+     * The one picture worth handing to the network itself, if there is one.
      *
      * Only the first: sending several means a media group, which is a different
      * call on every network that has one, and mixing files with images is not
      * something they agree on. The rest relay as links in the text.
      */
-    private function photoFor(Connector $connector, Outgoing $outgoing): ?Media
+    private function photoIn(Outgoing $outgoing): ?Media
     {
-        if (! $connector instanceof CanSendMedia) {
-            return null;
-        }
-
         foreach ($outgoing->media as $item) {
             if ($item->isImage() && $item->url !== null && MessageText::isRelayableUrl($item->url)) {
                 return $item;
@@ -194,6 +242,27 @@ final class ChatRelay
         }
 
         return null;
+    }
+
+    /**
+     * Every connector this Discord channel is bridged through, and the room on
+     * each.
+     *
+     * @return list<array{0: Connector, 1: string}>
+     */
+    private function bridgedConnectors(string $channelId): array
+    {
+        $bridged = [];
+
+        foreach ($this->bot->connectors() as $name => $connector) {
+            $target = $this->bot->getStore()->links($name)->targetFor($channelId);
+
+            if ($target !== null) {
+                $bridged[] = [$connector, $target];
+            }
+        }
+
+        return $bridged;
     }
 
     /**
@@ -229,7 +298,7 @@ final class ChatRelay
             return false;
         }
 
-        return ! $this->isCommand((string) $message->content, $this->bot->getConfig()->discordPrefix);
+        return ! $this->isDiscordCommand((string) $message->content);
     }
 
     // ── Everywhere → Discord ───────────────────────────────────────────
@@ -237,62 +306,288 @@ final class ChatRelay
     private function fromConnector(Connector $connector, Incoming $incoming): void
     {
         // The connector has already dropped its own echo; commands are dropped
-        // here so they are handled without also being broadcast.
-        if ($incoming->own || $this->isCommand((string) $incoming->text, $this->bot->getConfig()->discordPrefix)) {
+        // here so they are answered without also being broadcast. Recognised by
+        // *that network's* prefix, which need not be Discord's.
+        if ($incoming->own || $incoming->isEmpty()) {
             return;
         }
 
-        if ($incoming->isEmpty()) {
+        if (($this->commands[$connector->name()] ?? null)?->isCommand((string) $incoming->text)) {
             return;
         }
 
-        $surface = $connector->surface();
-        $text = $this->renderForDiscord($incoming, $surface->lines);
+        $this->acrossNetworks($connector, $incoming);
 
-        if ($text === null) {
+        $channels = $this->channelsFor($connector, $incoming);
+
+        if ($channels === []) {
             return;
         }
 
-        $channels = $this->bot->getStore()->links($connector->name())->discordFor($incoming->target);
-        $suffix = ' (' . $connector->name() . ')';
+        if ($incoming->edited && $incoming->id !== null && $this->editInDiscord($connector, $incoming)) {
+            return;
+        }
 
-        foreach ($channels as $channelId) {
-            $channel = $this->bot->getChannel($channelId);
+        $mirror = $this->mirrorableIn($connector, $incoming);
 
-            if (! $channel instanceof Channel) {
-                $this->bot->getLogger()->debug('[relay] no cached channel ' . $channelId . ' — skipping');
+        all([
+            $mirror === null ? resolve(null) : $this->fetch($connector, $mirror),
+            $connector instanceof Avatars
+                ? $connector->avatarFor($incoming)->then(null, static fn (): ?string => null)
+                : resolve(null),
+        ])->then(function (array $fetched) use ($connector, $incoming, $channels, $mirror): void {
+            [$file, $avatar] = $fetched;
+
+            // A file that made it across is shown as itself, not named as well.
+            $text = $this->renderForDiscord($incoming, $connector->surface()->lines, $file === null ? null : $mirror);
+
+            if ($text === null && $file === null) {
+                return;
+            }
+
+            foreach ($channels as $channel) {
+                $this->deliver($connector, $channel, $incoming, $text, $avatar, $file);
+            }
+        });
+    }
+
+    /**
+     * Hands a message on to every *other* network bridged to the same Discord
+     * channels, so a channel bridged to Twitch and Telegram is one conversation
+     * across all three rather than two that only Discord can see.
+     *
+     * Discord cannot make this hop itself: the copy it receives arrives through
+     * a webhook, and webhook messages are dropped unconditionally because that
+     * is what stops the loop. So it is made here, from the original.
+     *
+     * Each room gets the message once however many channels lead to it, and an
+     * edit follows the same rule as everywhere else — applied as an edit where
+     * the network can and the copy is remembered, otherwise not at all.
+     */
+    private function acrossNetworks(Connector $source, Incoming $incoming): void
+    {
+        $key = self::incomingKey($source, $incoming);
+        $outgoing = null;
+        $reached = [];
+
+        foreach ($this->bot->getStore()->links($source->name())->discordFor($incoming->target) as $channelId) {
+            foreach ($this->bridgedConnectors((string) $channelId) as [$connector, $target]) {
+                $room = $connector->name() . "\0" . $target;
+
+                if ($connector === $source || isset($reached[$room])) {
+                    continue;
+                }
+
+                $reached[$room] = true;
+                $outgoing ??= $this->composeFromNetwork($source, $incoming, $key);
+
+                if ($outgoing->isEmpty()) {
+                    return;
+                }
+
+                if (! $incoming->edited) {
+                    $this->relayTo($connector, $target, $outgoing);
+
+                    continue;
+                }
+
+                $remoteId = $this->sent->lookup($connector->name() . ':' . $key);
+
+                if ($connector instanceof Editing && $remoteId !== null) {
+                    $connector->edit($target, (string) $remoteId, $outgoing)->then(
+                        null,
+                        fn (\Throwable $e) => $this->bot->getLogger()->debug(sprintf(
+                            '[relay] %s would not take an edit: %s',
+                            $connector->name(),
+                            $e->getMessage(),
+                        )),
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * A message from one network as another should receive it.
+     *
+     * Named with the network it came from, as a Discord copy is. A file only
+     * the source network can open — a Telegram photo has no URL that does not
+     * carry the bot token — is named rather than linked.
+     */
+    private function composeFromNetwork(Connector $source, Incoming $incoming, string $key): Outgoing
+    {
+        $text = trim((string) $incoming->text);
+        $media = [];
+
+        foreach ($incoming->media as $item) {
+            if ($item->url !== null && MessageText::isRelayableUrl($item->url)) {
+                $media[] = $item;
 
                 continue;
             }
 
-            $this->deliver($connector, $channel, $incoming, $text, $suffix);
+            $text = ltrim($text . ' 📎 ' . ($item->name ?? ($item->isImage() ? 'a photo' : 'a file')));
         }
+
+        return new Outgoing(
+            author: $incoming->author . $this->suffix($source),
+            text: $text,
+            media: $media,
+            sourceId: $incoming->id === null ? null : $key,
+            edited: $incoming->edited,
+        );
     }
 
+    /**
+     * Every cached Discord channel following the room a message came from.
+     *
+     * @return list<Channel>
+     */
+    private function channelsFor(Connector $connector, Incoming $incoming): array
+    {
+        $channels = [];
+
+        foreach ($this->bot->getStore()->links($connector->name())->discordFor($incoming->target) as $channelId) {
+            $channel = $this->bot->getChannel($channelId);
+
+            if ($channel instanceof Channel) {
+                $channels[] = $channel;
+            } else {
+                $this->bot->getLogger()->debug('[relay] no cached channel ' . $channelId . ' — skipping');
+            }
+        }
+
+        return $channels;
+    }
+
+    /**
+     * Rewrites every Discord copy of an edited message, returning whether any
+     * were remembered.
+     *
+     * When none are — the original was relayed before the last restart, or so
+     * long ago it fell out of memory — the edit is relayed as a new message
+     * rather than lost, which on a network that sends whole messages as edits
+     * is the only way the correction reaches anyone.
+     */
+    private function editInDiscord(Connector $connector, Incoming $incoming): bool
+    {
+        $copies = $this->delivered->lookup(self::incomingKey($connector, $incoming));
+
+        if (! is_array($copies) || $copies === []) {
+            return false;
+        }
+
+        $text = $this->renderForDiscord($incoming, $connector->surface()->lines);
+
+        if ($text === null) {
+            return true;
+        }
+
+        foreach ($copies as $copy) {
+            $channel = $this->bot->getChannel($copy['channel_id']);
+
+            if (! $channel instanceof Channel) {
+                continue;
+            }
+
+            $this->bot->delivery()
+                ->edit($channel, $copy['message_id'], $copy['via'], $incoming->author, $text, $this->suffix($connector))
+                ->then(null, fn (\Throwable $e) => $this->bot->getLogger()->debug(
+                    '[relay] could not edit the copy in ' . $copy['channel_id'] . ': ' . $e->getMessage(),
+                ));
+        }
+
+        return true;
+    }
+
+    /**
+     * @param array{filename: string, content: string}|null $file
+     */
     private function deliver(
         Connector $connector,
         Channel $channel,
         Incoming $incoming,
-        string $text,
-        string $suffix,
+        ?string $text,
+        ?string $avatar,
+        ?array $file,
     ): void {
         $this->bot->delivery()
-            ->deliver($channel, $incoming->author, $text, null, $suffix)
-            ->then(null, function (\Throwable $e) use ($channel): void {
-                $this->bot->getLogger()->warning('[relay] delivery to ' . $channel->id . ' failed: ' . $e->getMessage());
+            ->deliver($channel, $incoming->author, $text, $avatar, $this->suffix($connector), $file)
+            ->then(
+                function (array $copy) use ($connector, $incoming, $channel): void {
+                    if ($incoming->id === null) {
+                        return;
+                    }
 
-                // Drop the cached webhook. If it was deleted out from under us,
-                // every later message would otherwise keep failing against the
-                // same dead handle; forgetting it means the next one recreates.
-                $this->bot->delivery()->forget($channel);
-            });
+                    $key = self::incomingKey($connector, $incoming);
+                    $copies = $this->delivered->lookup($key);
+                    $copies = is_array($copies) ? $copies : [];
+                    $copies[] = $copy + ['channel_id' => (string) $channel->id];
+
+                    $this->delivered->remember($key, $copies);
+                },
+                function (\Throwable $e) use ($channel): void {
+                    $this->bot->getLogger()->warning('[relay] delivery to ' . $channel->id . ' failed: ' . $e->getMessage());
+
+                    // Drop the cached webhook. If it was deleted out from under
+                    // us, every later message would otherwise keep failing
+                    // against the same dead handle; forgetting it means the
+                    // next one recreates.
+                    $this->bot->delivery()->forget($channel);
+                },
+            );
+    }
+
+    /**
+     * The one attachment worth copying across as a file.
+     *
+     * Only one, and only from a connector that can fetch it: a second upload
+     * per message multiplies the bytes by every channel it fans out to.
+     */
+    private function mirrorableIn(Connector $connector, Incoming $incoming): ?Media
+    {
+        if (! $connector instanceof CanSendMedia) {
+            return null;
+        }
+
+        foreach ($incoming->media as $item) {
+            if ($item->id !== null && $item->url === null) {
+                return $item;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return PromiseInterface<array{filename: string, content: string}|null>
+     */
+    private function fetch(Connector $connector, Media $media): PromiseInterface
+    {
+        if (! $connector instanceof CanSendMedia) {
+            return resolve(null);
+        }
+
+        return $connector->fetchMedia($media)->then(
+            null,
+            function (\Throwable $e) use ($connector): mixed {
+                // Deliberately not the exception's message: it can quote the
+                // request, and on at least one network the request URL is a
+                // credential.
+                $this->bot->getLogger()->warning(sprintf('[relay] could not fetch a file from %s', $connector->name()));
+
+                return null;
+            },
+        );
     }
 
     /**
      * One incoming message as Discord should show it: the quoted reply, the
      * text, and whatever files came with it.
+     *
+     * @param ?Media $mirrored An attachment that is being uploaded, so is not named as well.
      */
-    private function renderForDiscord(Incoming $incoming, bool $sourceHasLines): ?string
+    private function renderForDiscord(Incoming $incoming, bool $sourceHasLines, ?Media $mirrored = null): ?string
     {
         $parts = [];
 
@@ -307,7 +602,9 @@ final class ChatRelay
         }
 
         foreach ($incoming->media as $item) {
-            $parts[] = $this->describeMedia($item);
+            if ($item !== $mirrored) {
+                $parts[] = $this->describeMedia($item);
+            }
         }
 
         $rendered = trim(implode("\n", array_filter($parts, static fn (string $p): bool => trim($p) !== '')));
@@ -333,17 +630,26 @@ final class ChatRelay
         return sprintf('-# 📎 %s', MessageText::escapeMarkdown($name));
     }
 
+    /** Appended to a relayed name, so it is never mistaken for a Discord account. */
+    private function suffix(Connector $connector): string
+    {
+        return ' (' . $connector->name() . ')';
+    }
+
     // ── Shared ─────────────────────────────────────────────────────────
 
     /**
-     * Whether a line is addressed to the bot rather than to the channel.
+     * Whether a Discord message is addressed to the bot rather than to the
+     * channel.
      *
      * Only a *registered* command counts. Chat is full of `!` — "yes!!!", or
      * another bot's `!drop` — and treating all of it as a command would quietly
      * stop relaying a slice of ordinary conversation.
      */
-    public function isCommand(string $content, string $prefix): bool
+    public function isDiscordCommand(string $content): bool
     {
+        $prefix = $this->bot->getConfig()->discordPrefix;
+
         if ($prefix === '' || ! str_starts_with($content, $prefix)) {
             return false;
         }
@@ -354,9 +660,35 @@ final class ChatRelay
             return false;
         }
 
-        [$action] = $this->bot->getActions()->resolve(preg_split('/\s+/', $rest) ?: []);
+        $words = preg_split('/\s+/', $rest) ?: [];
 
-        return $action !== null;
+        return $this->bot->getActions()->resolve($words)[0] !== null
+            || (count($words) === 1 && in_array(strtolower($words[0]), $this->bot->getActions()->qualifiers(), true));
+    }
+
+    /**
+     * What a relayed message looked like, for telling a real edit from an
+     * update that changed nothing a chat can see.
+     */
+    public static function fingerprint(Message $message): string
+    {
+        $attachments = [];
+
+        foreach ($message->attachments ?? [] as $attachment) {
+            $attachments[] = (string) ($attachment->id ?? '');
+        }
+
+        return md5((string) $message->content . "\0" . implode(',', $attachments));
+    }
+
+    /**
+     * Where a message from a network is remembered. Room and id together,
+     * because a message id is only unique within its room on some networks —
+     * Telegram numbers each chat from one.
+     */
+    private static function incomingKey(Connector $connector, Incoming $incoming): string
+    {
+        return $connector->name() . ':' . $incoming->target . ':' . (string) $incoming->id;
     }
 
     private function compose(Message $message, bool $edited): Outgoing
@@ -408,6 +740,7 @@ final class ChatRelay
                 url: $url,
                 id: (string) ($attachment->id ?? ''),
                 name: (string) ($attachment->filename ?? ''),
+                size: isset($attachment->size) ? (int) $attachment->size : null,
             );
         }
 

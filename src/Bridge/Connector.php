@@ -69,8 +69,19 @@ interface Connector
      */
     public function boot(Bot $bot): void;
 
-    /** Connects. Called once Discord is ready and the bridges are known. */
-    public function start(): void;
+    /**
+     * Connects. Called once Discord is ready and the bridges are known.
+     *
+     * Resolves once the connector can actually send and receive, and rejects
+     * when it cannot. That is not a formality: the core joins rooms only after
+     * this resolves, reports a network that failed rather than one that merely
+     * looks quiet, and refuses to remove stale slash commands unless every
+     * connector got here — pruning against a connector that never declared its
+     * commands would delete them.
+     *
+     * @return PromiseInterface<mixed>
+     */
+    public function start(): PromiseInterface;
 
     /** Disconnects cleanly, for shutdown. */
     public function stop(): void;

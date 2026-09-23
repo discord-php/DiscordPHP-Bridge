@@ -19,6 +19,7 @@ use Bridge\Builders\PanelBuilder;
 use Bridge\Capability\ProvidesActions;
 use Bridge\Capability\ProvidesModules;
 use Bridge\Command\ActionRegistry;
+use Bridge\Command\Cooldowns;
 use Bridge\Command\DiscordAdapter;
 use Bridge\Command\SlashAdapter;
 use Bridge\Helpers\ComponentRouter;
@@ -34,8 +35,10 @@ use Discord\Parts\Interactions\Interaction;
 use Discord\Repository\Interaction\GlobalCommandRepository;
 use Discord\WebSockets\Event as DiscordEvent;
 use Discord\WebSockets\Intents;
+use React\Promise\PromiseInterface;
 
 use function React\Promise\all;
+use function React\Promise\reject;
 use function React\Promise\resolve;
 
 /**
@@ -101,6 +104,11 @@ class Bot extends MessageCommandClient
 
     private bool $started = false;
 
+    /** @var array<string, bool> connector name => whether it started */
+    private array $up = [];
+
+    private readonly Cooldowns $cooldowns;
+
     /** Every top-level slash command this build defines; see {@see Support\CommandSync}. */
     private array $declared = [];
 
@@ -128,6 +136,7 @@ class Bot extends MessageCommandClient
         $this->actions = new ActionRegistry();
         $this->components = new ComponentRouter();
         $this->pacer = new OutboundPacer($this->getLoop());
+        $this->cooldowns = new Cooldowns();
 
         // The core's own commands, under the one qualifier no connector may
         // claim. Registered first so a connector that tried would collide here
@@ -146,6 +155,12 @@ class Bot extends MessageCommandClient
         $this->components->on('dismiss', static fn (Interaction $interaction) => $interaction->updateMessage(
             PanelBuilder::notice('Cancelled.'),
         ));
+
+        // The second press behind every connector's `reset`.
+        $this->components->on(
+            BridgeActions::CONFIRM_RESET,
+            fn (Interaction $interaction, array $args) => BridgeActions::confirmed($this, $interaction, (string) ($args[0] ?? '')),
+        );
 
         $this->addStartupWarnings('bridge configuration', $store->warnings());
 
@@ -241,6 +256,12 @@ class Bot extends MessageCommandClient
     public function pacer(): OutboundPacer
     {
         return $this->pacer;
+    }
+
+    /** One clock for every surface, so a cooldown cannot be dodged by switching chats. */
+    public function cooldowns(): Cooldowns
+    {
+        return $this->cooldowns;
     }
 
     public function delivery(): WebhookDelivery
@@ -371,12 +392,17 @@ class Bot extends MessageCommandClient
     // ── Startup ────────────────────────────────────────────────────────
 
     /**
-     * Connects every connector once Discord is ready, then wires up everything
-     * that needs them.
+     * Wires up Discord once it is ready, then connects every connector.
      *
-     * A connector that fails to start does not take the others with it, and
-     * does not stop the Discord half registering: an operator has to be able to
-     * ask what went wrong from somewhere.
+     * Discord's half goes first and does not wait. The catalogue is complete
+     * the moment the connectors are installed — each adds its actions then — so
+     * there is nothing to wait for, and waiting would let a network that is
+     * slow to come up, or never does, hold Discord's commands hostage. An
+     * operator has to be able to ask what went wrong from somewhere.
+     *
+     * Each connector then starts on its own. One that fails does not take the
+     * others with it; its rooms are simply never joined, and the bridge check
+     * says so.
      */
     private function start(): void
     {
@@ -386,46 +412,89 @@ class Bot extends MessageCommandClient
 
         $this->started = true;
 
+        (new DiscordAdapter($this, $this->actions))->register();
+        (new SlashAdapter($this, $this->actions))->register();
+
+        $this->bootModules();
+
+        // Listeners only. Nothing arrives from a connector until it starts,
+        // and they are all in place before any of them do.
+        $this->relay = new ChatRelay($this);
+        $this->relay->attach();
+
+        $this->logger->info(sprintf(
+            '[bridge] %d action(s) across %d connector(s)',
+            $this->actions->count(),
+            count($this->connectors),
+        ));
+
+        $this->reportRestoredBridges();
+
         $starting = [];
 
         foreach ($this->connectors as $name => $connector) {
-            $starting[$name] = resolve(null)->then(static function () use ($connector): bool {
-                $connector->start();
-
-                return true;
-            })->then(null, function (\Throwable $e) use ($name): bool {
-                $this->logger->error(sprintf('[bridge] %s failed to start: %s', $name, $e->getMessage()));
-                $this->logger->warning(sprintf('[bridge] running without %s; its bridges and commands are unavailable', $name));
-
-                return false;
-            });
+            $starting[$name] = $this->startConnector($name, $connector);
         }
 
         ($starting === [] ? resolve([]) : all($starting))->then(function (array $up): void {
-            // The catalogue is complete once every connector has had its turn,
-            // so the adapters see all of it and publish one command per
-            // qualifier rather than one per connector boot.
-            (new DiscordAdapter($this, $this->actions))->register();
-            (new SlashAdapter($this, $this->actions))->register();
+            $this->pruneCommands(! in_array(false, $up, true));
 
-            $this->bootModules();
-
-            $this->relay = new ChatRelay($this);
-            $this->relay->attach();
-
-            foreach (array_keys(array_filter($up)) as $name) {
-                $this->sync((string) $name);
+            if ($this->store->count() > 0) {
+                // Late enough that the guild caches have settled and the joins
+                // have landed; probing any earlier reports working bridges as
+                // broken.
+                $this->getLoop()->addTimer(self::BRIDGE_CHECK_DELAY, fn () => $this->verifyBridges());
             }
-
-            $this->logger->info(sprintf(
-                '[bridge] %d action(s) across %d connector(s)',
-                $this->actions->count(),
-                count(array_filter($up)),
-            ));
-
-            $this->pruneCommands($up === [] || ! in_array(false, $up, true));
-            $this->reportRestoredBridges();
         });
+    }
+
+    /**
+     * Starts one connector, then joins its rooms.
+     *
+     * Joining waits for the start rather than racing it: a connector cannot
+     * join anything before it has a connection to join with, and one that
+     * tried would report every room as missing.
+     *
+     * @return PromiseInterface<bool> Whether it came up. Never rejects.
+     */
+    private function startConnector(string $name, Connector $connector): PromiseInterface
+    {
+        try {
+            $starting = $connector->start();
+        } catch (\Throwable $e) {
+            $starting = reject($e);
+        }
+
+        return $starting->then(
+            function () use ($name): bool {
+                $this->up[$name] = true;
+                $this->sync($name);
+
+                return true;
+            },
+            function (\Throwable $e) use ($name, $connector): bool {
+                $this->up[$name] = false;
+
+                $this->logger->error(sprintf('[bridge] %s failed to start: %s', $name, $e->getMessage()));
+                $this->logger->warning(sprintf('[bridge] running without %s; its bridges and commands are unavailable', $name));
+
+                // The reason stays in the log. An exception from a network
+                // library can quote a request, and a DM is not the place to
+                // find out whether this one did.
+                $this->notifyOwner(sprintf(
+                    "⚠️ **%s did not start**, so its bridges are not relaying. The reason is in the bot's log.",
+                    $connector->label(),
+                ));
+
+                return false;
+            },
+        );
+    }
+
+    /** Whether a connector has started and not failed. */
+    public function isUp(string $name): bool
+    {
+        return $this->up[$name] ?? false;
     }
 
     /**
@@ -538,22 +607,45 @@ class Bot extends MessageCommandClient
                 . implode("\n- ", $this->startupWarnings),
             );
         }
-
-        if ($this->store->count() === 0) {
-            return;
-        }
-
-        // Late enough that the guild caches have settled and the joins have had
-        // their chance; probing immediately would report both ends as broken.
-        $this->getLoop()->addTimer(self::BRIDGE_CHECK_DELAY, fn () => $this->verifyBridges());
     }
 
-    /** Probes every restored bridge, then says what is wrong with which. */
+    /**
+     * Probes every restored bridge, then says what is wrong with which.
+     *
+     * A connector that is down is reported once, as itself, rather than as a
+     * dozen separate bridges that each "cannot hear their room" — the dozen
+     * would be true and would hide the one thing worth fixing. Bridges for a
+     * connector that is not installed at all are reported the same way: they
+     * are kept, but nothing is relaying them.
+     */
     private function verifyBridges(): void
     {
         $probes = [];
+        $unrelayed = [];
+
+        foreach ($this->store->connectors() as $name) {
+            if (! isset($this->connectors[$name])) {
+                $unrelayed[] = sprintf(
+                    '%d %s bridge(s) are configured, but that connector is not installed — they are kept, and nothing is relaying them.',
+                    $this->store->links($name)->count(),
+                    $name,
+                );
+            }
+        }
 
         foreach ($this->connectors as $name => $connector) {
+            if (! $this->isUp($name)) {
+                if (! $this->store->links($name)->isEmpty()) {
+                    $unrelayed[] = sprintf(
+                        '%s is not connected, so its %d bridge(s) are not relaying.',
+                        $connector->label(),
+                        $this->store->links($name)->count(),
+                    );
+                }
+
+                continue;
+            }
+
             foreach ($this->store->links($name)->targets() as $target) {
                 $probes[$name . "\0" . $target] = $connector->resolve($target)->then(
                     static fn (?Room $room): bool => $room !== null,
@@ -563,10 +655,14 @@ class Bot extends MessageCommandClient
             }
         }
 
-        ($probes === [] ? resolve([]) : all($probes))->then(function (array $exists): void {
+        ($probes === [] ? resolve([]) : all($probes))->then(function (array $exists) use ($unrelayed): void {
             $rows = [];
 
             foreach ($this->connectors as $name => $connector) {
+                if (! $this->isUp($name)) {
+                    continue;
+                }
+
                 $links = $this->store->links($name);
                 $joined = $connector->joined();
 
@@ -585,11 +681,14 @@ class Bot extends MessageCommandClient
             }
 
             $summary = BridgeCheck::summarise($rows);
+            $summary['problems'] = [...$unrelayed, ...$summary['problems']];
+            $total = $this->store->count();
+
             $headline = sprintf(
                 '%d of %d bridge%s working',
                 $summary['healthy'],
-                count($rows),
-                count($rows) === 1 ? '' : 's',
+                $total,
+                $total === 1 ? '' : 's',
             );
 
             $this->rememberCheck($headline);

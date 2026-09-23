@@ -13,6 +13,8 @@ declare(strict_types=1);
 
 namespace Bridge\Actions;
 
+use Bridge\Bot;
+use Bridge\Builders\PanelBuilder;
 use Bridge\Capability\ProvidesActions;
 use Bridge\Command\Access;
 use Bridge\Command\Action;
@@ -22,8 +24,11 @@ use Bridge\Command\Context;
 use Bridge\Command\Slash;
 use Bridge\Command\SlashOption;
 use Bridge\Connector;
+use Bridge\Helpers\ComponentRouter;
 use Bridge\Room;
 use Bridge\Support\Format;
+use Bridge\Support\Permissions;
+use Discord\Parts\Interactions\Interaction;
 use React\Promise\PromiseInterface;
 
 /**
@@ -49,6 +54,9 @@ use React\Promise\PromiseInterface;
  */
 final class BridgeActions implements ProvidesActions
 {
+    /** The component action the `reset` confirmation button carries. */
+    public const CONFIRM_RESET = 'reset';
+
     public function __construct(private readonly Connector $connector)
     {
     }
@@ -132,6 +140,7 @@ final class BridgeActions implements ProvidesActions
     {
         $guildId = $context->requireGuild();
         $channelId = $this->channel($context, $arguments, 1);
+        $this->requireChannelInGuild($context, $channelId, $guildId);
         $target = $this->target($arguments->named('target') ?? $arguments->get(0));
 
         return $this->connector->resolve($target)->then(
@@ -186,7 +195,11 @@ final class BridgeActions implements ProvidesActions
         $guildId = $context->requireGuild();
         $channelId = $this->channel($context, $arguments, 0);
         $store = $context->bot->getStore();
-        $before = $store->links($this->connector->name())->targetFor($channelId);
+
+        // This server's own bridges only. Reading across every server would
+        // report another server's channel as unlinked while the store — which
+        // is scoped by server — quietly left it alone.
+        $before = $store->links($this->connector->name())->forGuild($guildId)[$channelId] ?? null;
 
         if ($before === null) {
             return sprintf('<#%s> was not bridged with %s.', $channelId, $this->connector->label());
@@ -234,10 +247,11 @@ final class BridgeActions implements ProvidesActions
 
     private function status(Context $context): string
     {
-        $channelId = $context->channelId();
-        $target = $channelId === null
-            ? null
-            : $context->bot->getStore()->links($this->connector->name())->targetFor($channelId);
+        // Every adapter has already worked out which room this is about: on
+        // Discord the one bridged to the channel, in a chat the chat itself.
+        // Looking it up again from a Discord channel id would find nothing when
+        // this is asked from the far end.
+        $target = $context->target;
 
         if ($target === null) {
             return sprintf(
@@ -258,25 +272,64 @@ final class BridgeActions implements ProvidesActions
         ], sprintf('%s bridge', $this->connector->label()));
     }
 
-    private function reset(Context $context): string
+    /**
+     * Asks first. Clearing every bridge in a server is irreversible, and it is
+     * exactly the kind of thing somebody fires while meaning `list` — so this
+     * answers with a confirmation panel, and the clearing happens in
+     * {@see self::confirmed()} when its button is pressed.
+     */
+    private function reset(Context $context): string|PanelBuilder
     {
         $guildId = $context->requireGuild();
-        $store = $context->bot->getStore();
-        $count = count($store->links($this->connector->name())->forGuild($guildId));
+        $count = count($context->bot->getStore()->links($this->connector->name())->forGuild($guildId));
 
         if ($count === 0) {
             return 'there was nothing to clear.';
         }
 
-        $store->forgetGuild($this->connector->name(), $guildId);
-        $context->bot->sync($this->connector->name());
-
-        return sprintf(
-            'cleared %d %s bridge%s in this server.',
-            $count,
-            $this->connector->label(),
-            $count === 1 ? '' : 's',
+        return PanelBuilder::confirm(
+            sprintf(
+                "**Clear all %d %s bridge%s in this server?**\nThis cannot be undone, and nothing will relay until they are linked again.",
+                $count,
+                $this->connector->label(),
+                $count === 1 ? '' : 's',
+            ),
+            ComponentRouter::id(self::CONFIRM_RESET, $this->connector->name()),
+            'Clear them all',
         );
+    }
+
+    /**
+     * The `reset` button, pressed.
+     *
+     * The rung is checked again here rather than trusted from when the panel
+     * was drawn. A prefix command's reply is visible to the whole channel, so
+     * the person pressing the button need not be the person who asked.
+     */
+    public static function confirmed(Bot $bot, Interaction $interaction, string $connectorName): PromiseInterface
+    {
+        $guildId = (string) ($interaction->guild_id ?? '');
+        $connector = $bot->connector($connectorName);
+        $access = Permissions::accessForInteraction($interaction, $bot->getConfig()->discordOwnerId);
+
+        if ($guildId === '' || $connector === null || ! $access->satisfies(Access::Administrator)) {
+            return $interaction->respondWithMessage(
+                PanelBuilder::error(sprintf('That is limited to %s.', Access::Administrator->label())),
+                true,
+            );
+        }
+
+        $count = count($bot->getStore()->links($connectorName)->forGuild($guildId));
+
+        $bot->getStore()->forgetGuild($connectorName, $guildId);
+        $bot->sync($connectorName);
+
+        return $interaction->updateMessage(PanelBuilder::success(sprintf(
+            'Cleared %d %s bridge%s in this server.',
+            $count,
+            $connector->label(),
+            $count === 1 ? '' : 's',
+        )));
     }
 
     // ── Shared ─────────────────────────────────────────────────────────
@@ -302,6 +355,27 @@ final class BridgeActions implements ProvidesActions
 
         return $context->channelId()
             ?? throw new ActionError('I could not work out which channel you meant.');
+    }
+
+    /**
+     * Refuses a channel from another server.
+     *
+     * The permission gate checks that the invoker administers *this* server.
+     * A channel mention is just an id, and the bot sits in many servers, so
+     * without this an admin of one could name a channel in another — where
+     * they may have no rights at all — and have it relayed into a public chat.
+     *
+     * @throws ActionError
+     */
+    private function requireChannelInGuild(Context $context, string $channelId, string $guildId): void
+    {
+        $channel = $context->bot->getChannel($channelId);
+
+        if ($channel !== null && (string) ($channel->guild_id ?? '') === $guildId) {
+            return;
+        }
+
+        throw new ActionError(sprintf('<#%s> is not a channel in this server.', $channelId));
     }
 
     /** Whatever was typed, as the connector addresses rooms. */

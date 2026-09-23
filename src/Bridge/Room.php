@@ -27,18 +27,32 @@ namespace Bridge;
  * silently never works, because the bot joins a room that isn't there and
  * never hears anything.
  *
+ * ## Two identifiers, because some networks have two
+ *
+ * `id` is how the room is *routed*: what {@see Store} keeps, what
+ * {@see Links} matches incoming messages against, what the connector joins.
+ * `platformId` is what the network's own API wants when that is something else.
+ *
+ * Twitch is the case that makes the distinction necessary. Chat arrives
+ * addressed to a channel *login* — `#coffeescrafts` — so that is what a bridge
+ * must be keyed by; but Helix wants the broadcaster's numeric *user id*. Storing
+ * the numeric id would make every bridge silently deaf, because no message
+ * would ever arrive addressed to it. Telegram has only one, and leaves
+ * `platformId` null.
+ *
  * @author Valithor Obsidion <valithor@discordphp.org>
  */
 final class Room
 {
     /**
-     * @param string  $id          As the connector addresses it, and as {@see Store} keeps it.
+     * @param string  $id          How the room is routed, and as {@see Store} keeps it.
      * @param string  $label       What to call it in front of a human.
      * @param ?string $url         Somewhere to open it, when the platform has public links.
      * @param ?string $kind        The platform's own word for what this is — "channel", "supergroup".
      * @param ?int    $members     Only when the platform makes it cheap to ask.
      * @param ?string $description As the room describes itself.
      * @param ?string $avatarUrl   For a panel's thumbnail.
+     * @param ?string $platformId  What the network's API calls it, when that is not `$id`.
      */
     public function __construct(
         public readonly string $id,
@@ -48,6 +62,13 @@ final class Room
         public readonly ?int $members = null,
         public readonly ?string $description = null,
         public readonly ?string $avatarUrl = null,
+        public readonly ?string $platformId = null,
     ) {
+    }
+
+    /** The id to hand the network's API. */
+    public function apiId(): string
+    {
+        return $this->platformId ?? $this->id;
     }
 }

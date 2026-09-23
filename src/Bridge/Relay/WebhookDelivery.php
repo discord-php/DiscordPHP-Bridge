@@ -16,6 +16,7 @@ namespace Bridge\Relay;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Channel\Channel;
+use Discord\Parts\Channel\Message;
 use Discord\Parts\Channel\Webhook;
 use React\Promise\PromiseInterface;
 
@@ -58,6 +59,11 @@ final class WebhookDelivery
     /** Discord rejects a webhook username longer than this. */
     public const USERNAME_LIMIT = 80;
 
+    /** How a delivered copy was posted, which decides how it can be edited. */
+    public const VIA_WEBHOOK = 'webhook';
+
+    public const VIA_BOT = 'bot';
+
     /** @var array<string, Webhook|false> Channel id => webhook, or false when we know we can't have one. */
     private array $cache = [];
 
@@ -69,42 +75,99 @@ final class WebhookDelivery
     }
 
     /**
-     * Delivers one message to one Discord channel.
+     * Delivers one message to one Discord channel, and says where it landed.
      *
      * `allowed_mentions` is empty on every path: this text came from another
      * network and is untrusted, and somebody typing `@everyone` there must not
      * ping a Discord server. Neutering it at the API rather than by mangling
      * the text means they still read as having typed it.
      *
-     * @param string $suffix Appended to the display name, so it is obvious a
-     *                       relayed line is not a Discord account.
+     * The webhook is executed with `wait`, so Discord answers with the message
+     * it created. That id is what lets a later edit on the other network find
+     * this copy; without it every edit would have to be posted as a second
+     * message.
+     *
+     * @param string                                   $suffix Appended to the display name, so it is
+     *                                                         obvious a relayed line is not a Discord account.
+     * @param array{filename: string, content: string}|null $file A file to upload with it.
+     *
+     * @return PromiseInterface<array{message_id: string, via: string}>
      */
     public function deliver(
         Channel $channel,
         string $author,
-        string $text,
+        ?string $text,
         ?string $avatarUrl = null,
         string $suffix = '',
+        ?array $file = null,
     ): PromiseInterface {
         return $this->pacer->enqueue(
             (string) $channel->id,
             fn (): PromiseInterface => $this->webhookFor($channel)->then(
-                function (Webhook $webhook) use ($author, $text, $avatarUrl, $suffix): PromiseInterface {
-                    $payload = [
-                        'content' => $text,
-                        'username' => self::safeUsername($author, $suffix),
-                        'allowed_mentions' => ['parse' => []],
-                    ];
+                function (Webhook $webhook) use ($author, $text, $avatarUrl, $suffix, $file): PromiseInterface {
+                    $builder = $this->body($text, $file)->setUsername(self::safeUsername($author, $suffix));
 
                     if ($avatarUrl !== null) {
-                        $payload['avatar_url'] = $avatarUrl;
+                        $builder->setAvatarUrl($avatarUrl);
                     }
 
-                    return $webhook->execute($payload);
+                    return $webhook->execute($builder, ['wait' => true])->then(
+                        static fn (Message $sent): array => ['message_id' => (string) $sent->id, 'via' => self::VIA_WEBHOOK],
+                    );
                 },
-                fn () => $this->fallback($channel, $author, $text, $suffix),
+                fn () => $this->fallback($channel, $author, $text, $suffix, $file),
             ),
         );
+    }
+
+    /**
+     * Rewrites a copy this delivery posted, to what the original now says.
+     *
+     * A webhook message is edited through the webhook that posted it; a
+     * fallback message through the bot, which authored it. Either way it goes
+     * through the pacer, because an edit spends the same channel's budget as a
+     * send.
+     */
+    public function edit(
+        Channel $channel,
+        string $messageId,
+        string $via,
+        string $author,
+        string $text,
+        string $suffix = '',
+    ): PromiseInterface {
+        return $this->pacer->enqueue(
+            (string) $channel->id,
+            fn (): PromiseInterface => $via === self::VIA_WEBHOOK
+                ? $this->webhookFor($channel)->then(
+                    fn (Webhook $webhook): PromiseInterface => $webhook->updateMessage($messageId, $this->body($text)),
+                )
+                : $channel->messages->fetch($messageId)->then(
+                    fn (Message $message): PromiseInterface => $message->edit(
+                        $this->body(sprintf('**%s%s:** %s', self::escape($author), $suffix, $text)),
+                    ),
+                ),
+        );
+    }
+
+    /**
+     * The part of a message both paths share.
+     *
+     * @param array{filename: string, content: string}|null $file
+     */
+    private function body(?string $text, ?array $file = null): MessageBuilder
+    {
+        $builder = MessageBuilder::new()->setAllowedMentions(['parse' => []]);
+
+        if ($text !== null && $text !== '') {
+            $builder->setContent($text);
+        }
+
+        if ($file !== null) {
+            $builder->addFileFromContent($file['filename'], $file['content']);
+        }
+
+        return $builder;
     }
 
     /** Forgets a channel's cached webhook — call when delivery starts failing. */
@@ -173,12 +236,21 @@ final class WebhookDelivery
         );
     }
 
-    private function fallback(Channel $channel, string $author, string $text, string $suffix): PromiseInterface
+    /**
+     * An ordinary bot message, for a channel the bot cannot create a webhook
+     * in. Uglier — every line carries the bot's name and picture, so the
+     * author has to be written into the text — but never silent.
+     *
+     * @param array{filename: string, content: string}|null $file
+     *
+     * @return PromiseInterface<array{message_id: string, via: string}>
+     */
+    private function fallback(Channel $channel, string $author, ?string $text, string $suffix, ?array $file): PromiseInterface
     {
         return $channel->sendMessage(
-            MessageBuilder::new()
-                ->setContent(sprintf('**%s%s:** %s', self::escape($author), $suffix, $text))
-                ->setAllowedMentions(['parse' => []]),
+            $this->body(sprintf('**%s%s:** %s', self::escape($author), $suffix, (string) $text), $file),
+        )->then(
+            static fn (Message $sent): array => ['message_id' => (string) $sent->id, 'via' => self::VIA_BOT],
         );
     }
 
