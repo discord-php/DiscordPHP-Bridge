@@ -1,5 +1,5 @@
 {
-    "name": "discord-php/bridge",
+    "name": "vzgcoders/discordphp-bridge",
     "description": "The platform-agnostic half of a Discord chat bridge: routing, persistence, one command catalogue served to every chat, and Components v2 panels. Platforms plug in as connectors.",
     "keywords": [
         "discord",
