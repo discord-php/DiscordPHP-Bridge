@@ -93,7 +93,7 @@ final class Environment
     public function require(string $key): string
     {
         return $this->get($key)
-            ?? throw new \RuntimeException("Missing required setting {$key} — see env.example.");
+            ?? throw new \RuntimeException("Missing required setting {$key} — see .env.example.");
     }
 
     /** Whether every one of these is set, for deciding whether to install a connector at all. */
