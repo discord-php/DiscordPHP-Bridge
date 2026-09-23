@@ -174,11 +174,22 @@ final class BridgeActions implements ProvidesActions
                     $this->permissionNote($context, $channelId),
                 );
             },
-            fn (\Throwable $e) => throw new ActionError(sprintf(
-                'could not check that %s room: %s',
-                $this->connector->label(),
-                $e->getMessage(),
-            )),
+            function (\Throwable $e) use ($context, $target): never {
+                // Logged, not quoted. The reply is public, and an error from
+                // another network's client is not guaranteed to be free of
+                // the request that caused it.
+                $context->bot->getLogger()->warning(sprintf(
+                    '[%s] could not look up %s to link it: %s',
+                    $this->connector->name(),
+                    $target,
+                    $e->getMessage(),
+                ));
+
+                throw new ActionError(sprintf(
+                    'could not reach %s to check that room — try again in a moment.',
+                    $this->connector->label(),
+                ));
+            },
         );
     }
 
