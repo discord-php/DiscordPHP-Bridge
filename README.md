@@ -35,10 +35,10 @@ final class TwitchConnector implements Connector, ProvidesActions
 {
     public function name(): string    { return 'twitch'; }   // also the slash command
     public function label(): string   { return 'Twitch'; }
-    public function surface(): Surface { return new Surface('twitch', 'Twitch', 500, markdown: false, lines: false); }
+    public function surface(): Surface { return new Surface('twitch', 'Twitch', 500, markdown: false, lines: false, prefix: '!'); }
 
-    public function boot(Bot $bot): void { /* listeners, before the first message */ }
-    public function start(): void        { /* connect, once Discord is ready */ }
+    public function boot(Bot $bot): void          { /* build the client, before the first message */ }
+    public function start(): PromiseInterface     { /* connect; reject if it cannot */ }
 
     public function relay(string $target, Outgoing $message): PromiseInterface { /* render, then say */ }
     public function resolve(string $target): PromiseInterface                  { /* ?Room */ }
@@ -47,9 +47,24 @@ final class TwitchConnector implements Connector, ProvidesActions
 }
 ```
 
-Four optional interfaces say what the network can do, so the relay asks instead
-of assuming: `Capability\Editing`, `Capability\Media`,
-`Capability\ProvidesActions`, `Capability\ProvidesModules`.
+Optional interfaces say what the network can do, so the relay asks instead of
+assuming: `Capability\Editing` (rewrite a relayed message), `Capability\Media`
+(carry a picture, and hand over a file's bytes for Discord), `Capability\Avatars`
+(a sender's picture for the Discord copy), `Capability\ProvidesActions` and
+`Capability\ProvidesModules`.
+
+`start()` returning a promise is not a formality. A connector that rejects is
+logged, reported to the owner, left out of the startup check, and stops the
+command prune pass — so a network that failed to come up cannot get its
+commands deleted from Discord.
+
+Commands typed in the network's own chat go to
+[`ChatDispatcher`](src/Bridge/Command/ChatDispatcher.php): the connector says
+who is asking, where, and at what rank, and the core does the rest — the same
+access checks, [cooldowns](src/Bridge/Command/Cooldowns.php) and refusals as
+every other surface. A command for *another* network acts on the room that
+shares a Discord channel with this one, and is refused rather than guessed when
+there is more than one.
 
 Registering it is one line, and it arrives with its configuration commands
 already written:
