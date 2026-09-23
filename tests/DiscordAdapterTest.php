@@ -44,6 +44,9 @@ final class DiscordAdapterTest extends TestCase
 
     private Bot $bot;
 
+    /** @var array<string, ?Access> The caller's rung in each channel; `null` = cannot see it. */
+    private array $rankIn = [];
+
     protected function setUp(): void
     {
         $this->bot = $this->bot();
@@ -67,8 +70,39 @@ final class DiscordAdapterTest extends TestCase
 
     public function testAnotherRoomThisServerBridgedMayBeNamed(): void
     {
+        $this->rankIn['333333333333'] = Access::Moderator;
+
         $this->assertSame('r2', $this->context($this->ban(), 'x target=r2')?->target);
         $this->assertSame('r2', $this->context($this->ban(), 'x channel=r2')?->target);
+    }
+
+    public function testNotIfTheCallerCannotSeeWhereThatRoomIsBridged(): void
+    {
+        // A room bridged to #staff is not reachable from #general by somebody
+        // who cannot open #staff — not even for an everyone-level command.
+        $this->rankIn['333333333333'] = null;
+
+        $this->assertInstanceOf(ActionError::class, $this->context($this->ban(), 'x target=r2'));
+        $this->assertInstanceOf(ActionError::class, $this->context($this->say(), 'hi target=r2'));
+    }
+
+    public function testRankIsHeldWhereTheRoomIsBridgedNotWhereItWasTyped(): void
+    {
+        // Manage Messages granted in one channel is not Manage Messages in
+        // every channel the server has.
+        $this->rankIn['333333333333'] = Access::Everyone;
+
+        $error = $this->context($this->ban(), 'x target=r2');
+
+        $this->assertInstanceOf(ActionError::class, $error);
+        $this->assertStringContainsString('limited to moderators', $error->getMessage());
+    }
+
+    public function testTheLowerOfTheTwoRanksIsTheOneUsed(): void
+    {
+        $this->rankIn['333333333333'] = Access::Administrator;
+
+        $this->assertSame(Access::Moderator, $this->context($this->ban(), 'x target=r2')?->access);
     }
 
     public function testARoomOnlyAnotherServerBridgedMayNot(): void
@@ -104,6 +138,11 @@ final class DiscordAdapterTest extends TestCase
         return new Action('alpha', 'ban', static fn () => null, access: Access::Moderator);
     }
 
+    private function say(): Action
+    {
+        return new Action('alpha', 'say', static fn () => null);
+    }
+
     /** The context the adapter builds, or the reason it refused. */
     private function context(Action $action, string $line, Access $access = Access::Moderator): Context|\Throwable|null
     {
@@ -115,7 +154,11 @@ final class DiscordAdapterTest extends TestCase
             'author' => (object) ['id' => '666666666666', 'username' => 'somebody'],
         ]);
 
-        $adapter = new DiscordAdapter($this->bot, $this->bot->getActions());
+        $adapter = new DiscordAdapter(
+            $this->bot,
+            $this->bot->getActions(),
+            fn (Message $message, string $channelId): ?Access => $this->rankIn[$channelId] ?? null,
+        );
         $contextFor = new \ReflectionMethod($adapter, 'contextFor');
 
         $result = null;

@@ -41,10 +41,26 @@ use function React\Promise\resolve;
  */
 final class DiscordAdapter
 {
+    /** @var \Closure(Message, string): ?Access */
+    private readonly \Closure $rankIn;
+
+    /**
+     * @param (callable(Message, string): ?Access)|null $rankIn The author's rung in a
+     *        channel of the same server, or `null` when they cannot see it. Defaults
+     *        to reading their permissions there; injectable for tests.
+     */
     public function __construct(
         private readonly Bot $bot,
         private readonly ActionRegistry $registry,
+        ?callable $rankIn = null,
     ) {
+        $this->rankIn = \Closure::fromCallable($rankIn ?? function (Message $message, string $channelId): ?Access {
+            $channel = $this->bot->getChannel($channelId);
+
+            return $channel === null
+                ? null
+                : Permissions::accessIn($message, $channel, $this->bot->getConfig()->discordOwnerId);
+        });
     }
 
     /**
@@ -232,19 +248,54 @@ final class DiscordAdapter
         }
 
         $guildId = (string) ($message->guild_id ?? '');
-        $bridgedHere = $guildId === '' ? [] : array_map(strval(...), array_values($links->forGuild($guildId)));
+        $bridgedHere = $guildId === '' ? [] : $links->forGuild($guildId);
 
         return $connector->resolve($named)->then(
-            static function (?Room $room) use ($base, $named, $bridgedHere, $access, $refused): Context {
+            function (?Room $room) use ($action, $base, $named, $bridgedHere, $access, $message, $refused): Context {
                 // Compared by the id the room is stored under, which need not
                 // be what was typed: a Telegram `@name` is stored as its id.
                 $id = $room?->id ?? $named;
+                $context = $base->withTarget($id, $room?->apiId());
 
-                if ($access !== Access::Operator && ! in_array($id, $bridgedHere, true)) {
+                if ($access === Access::Operator) {
+                    return $context;
+                }
+
+                // Held to the channel the room is bridged to, not the one this
+                // was typed in: rank in one channel says nothing about another,
+                // and a room bridged to a channel somebody cannot open is not
+                // theirs to reach from one they can.
+                $best = null;
+
+                foreach ($bridgedHere as $channelId => $target) {
+                    if ((string) $target !== $id) {
+                        continue;
+                    }
+
+                    $there = ($this->rankIn)($message, (string) $channelId);
+
+                    if ($there !== null && ($best === null || $there->value > $best->value)) {
+                        $best = $there;
+                    }
+                }
+
+                if ($best === null) {
                     throw $refused;
                 }
 
-                return $base->withTarget($id, $room?->apiId());
+                // The lower of the two: the rung checked before getting here
+                // was this channel's, and it must hold in both.
+                $effective = $best->value < $access->value ? $best : $access;
+
+                if (! $effective->satisfies($action->access)) {
+                    throw new ActionError(sprintf(
+                        'that is limited to %s in the channel `%s` is bridged to.',
+                        $action->access->label(),
+                        $id,
+                    ));
+                }
+
+                return $context->withAccess($effective);
             },
             // Unverifiable is refused: it cannot be shown to be one of ours.
             static fn (): never => throw $refused,

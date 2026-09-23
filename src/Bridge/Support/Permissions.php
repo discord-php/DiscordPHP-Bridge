@@ -15,6 +15,7 @@ namespace Bridge\Support;
 
 use Bridge\Command\Access;
 use Bridge\Command\Context;
+use Discord\Parts\Channel\Channel;
 use Discord\Parts\Channel\Message;
 
 /**
@@ -42,6 +43,20 @@ final class Permissions
      */
     public static function accessFor(Message $message, ?string $ownerId): Access
     {
+        return self::accessIn($message, $message->channel ?? null, $ownerId) ?? Access::Everyone;
+    }
+
+    /**
+     * The rung a message's author stands on in *another* channel of the same
+     * server — or `null` when they cannot see that channel at all.
+     *
+     * For acting on a room from somewhere other than the channel it is bridged
+     * to. Rank in one channel says nothing about another: Manage Messages can
+     * be granted in a single channel, and a room bridged to `#staff` must not
+     * be reachable by somebody who cannot open `#staff`.
+     */
+    public static function accessIn(Message $message, ?Channel $channel, ?string $ownerId): ?Access
+    {
         $userId = (string) ($message->author->id ?? '');
         $isOwner = $ownerId !== null && $ownerId !== '' && $userId === $ownerId;
 
@@ -56,15 +71,21 @@ final class Permissions
 
         $isAdmin = false;
         $isModerator = false;
+        $canSee = $isOwner || $isGuildOwner;
 
         $member = $message->member ?? null;
         if ($member !== null) {
-            $perms = $member->getPermissions($message->channel ?? null);
+            $perms = $member->getPermissions($channel);
 
             if ($perms !== null) {
                 $isAdmin = (bool) ($perms->administrator ?? false) || (bool) ($perms->manage_guild ?? false);
                 $isModerator = $isAdmin || (bool) ($perms->manage_messages ?? false);
+                $canSee = $canSee || (bool) ($perms->administrator ?? false) || (bool) ($perms->view_channel ?? false);
             }
+        }
+
+        if (! $canSee) {
+            return null;
         }
 
         return Context::discordAccess($isGuildOwner, $isAdmin, $isModerator, $isOwner);

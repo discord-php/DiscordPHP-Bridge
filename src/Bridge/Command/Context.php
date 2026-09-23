@@ -79,6 +79,23 @@ final class Context
         );
     }
 
+    /** A copy on a different rung — for acting somewhere rank is held differently. */
+    public function withAccess(Access $access): self
+    {
+        return new self(
+            $this->bot,
+            $this->surface,
+            $access,
+            $this->invokerName,
+            $this->invokerId,
+            $this->connector,
+            $this->target,
+            $this->targetId,
+            $this->isPublic,
+            $this->message,
+        );
+    }
+
     /** A copy acting on a different connector. */
     public function withConnector(?string $connector): self
     {
