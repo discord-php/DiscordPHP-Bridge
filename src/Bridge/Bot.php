@@ -29,6 +29,7 @@ use Bridge\Relay\OutboundPacer;
 use Bridge\Relay\WebhookDelivery;
 use Bridge\Support\BridgeCheck;
 use Bridge\Support\CommandSync;
+use Bridge\Support\InstallCheck;
 use Discord\MessageCommandClient;
 use Discord\Parts\Channel\Channel;
 use Discord\Parts\Interactions\Interaction;
@@ -161,6 +162,15 @@ class Bot extends MessageCommandClient
             BridgeActions::CONFIRM_RESET,
             fn (Interaction $interaction, array $args) => BridgeActions::confirmed($this, $interaction, (string) ($args[0] ?? '')),
         );
+
+        // Who can add the bot is decided in the Developer Portal, and nothing
+        // there warns when it is left open. DiscordPHP fetches the settings
+        // once connected; read them back and say what is wrong.
+        $this->once('application-init', function (): void {
+            foreach (InstallCheck::review($this->application) as $finding) {
+                $this->logger->log($finding['level'], '[bridge] ' . $finding['message']);
+            }
+        });
 
         $this->addStartupWarnings('bridge configuration', $store->warnings());
 
