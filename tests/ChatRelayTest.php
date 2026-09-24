@@ -199,6 +199,29 @@ final class ChatRelayTest extends TestCase
         $this->assertSame("look\n-# 📎 talk.mp4", $render->invoke($relay, $named, true, null));
     }
 
+    public function testADiscordAttachmentCarriesItsContentType(): void
+    {
+        // What lets Telegram send a GIF as an animation instead of a still.
+        $message = $this->bot->factory(\Discord\Parts\Channel\Message::class, [
+            'id' => '1',
+            'channel_id' => self::CHANNEL,
+            'content' => '',
+            'attachments' => [[
+                'id' => '9',
+                'filename' => 'dance.gif',
+                'url' => 'https://cdn.discordapp.com/attachments/1/9/dance.gif',
+                'content_type' => 'image/gif',
+                'size' => 2048,
+            ]],
+        ], true);
+
+        $media = (new \ReflectionMethod(ChatRelay::class, 'attachments'))->invoke(new ChatRelay($this->bot), $message);
+
+        $this->assertCount(1, $media);
+        $this->assertSame('image/gif', $media[0]->mimeType);
+        $this->assertTrue($media[0]->isImage());
+    }
+
     public function testAnUnbridgedRoomGoesNowhere(): void
     {
         $this->bridge('beta', self::CHANNEL, 'b1');

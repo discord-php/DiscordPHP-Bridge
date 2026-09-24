@@ -44,6 +44,9 @@ final class Media
      * @param ?string $link    A public page showing it — a post on t.me — for when there is
      *                         no `url` to the file itself. What a network that can only
      *                         carry text is given instead of the file's name.
+     * @param ?string $mimeType As the platform reported it, e.g. `image/gif` — how a
+     *                          network that sends a GIF differently from a still
+     *                          photo tells the two apart.
      */
     public function __construct(
         public readonly string $kind = self::FILE,
@@ -53,6 +56,7 @@ final class Media
         public readonly ?string $caption = null,
         public readonly ?int $size = null,
         public readonly ?string $link = null,
+        public readonly ?string $mimeType = null,
     ) {
     }
 

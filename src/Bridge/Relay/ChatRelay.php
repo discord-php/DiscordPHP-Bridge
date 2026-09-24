@@ -757,6 +757,7 @@ final class ChatRelay
                 id: (string) ($attachment->id ?? ''),
                 name: (string) ($attachment->filename ?? ''),
                 size: isset($attachment->size) ? (int) $attachment->size : null,
+                mimeType: (string) ($attachment->content_type ?? '') ?: null,
             );
         }
 
