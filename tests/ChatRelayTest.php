@@ -202,24 +202,40 @@ final class ChatRelayTest extends TestCase
     public function testADiscordAttachmentCarriesItsContentType(): void
     {
         // What lets Telegram send a GIF as an animation instead of a still.
-        $message = $this->bot->factory(\Discord\Parts\Channel\Message::class, [
-            'id' => '1',
-            'channel_id' => self::CHANNEL,
-            'content' => '',
-            'attachments' => [[
-                'id' => '9',
-                'filename' => 'dance.gif',
-                'url' => 'https://cdn.discordapp.com/attachments/1/9/dance.gif',
-                'content_type' => 'image/gif',
-                'size' => 2048,
-            ]],
-        ], true);
+        $message = $this->discordMessage('', [[
+            'id' => '9',
+            'filename' => 'dance.gif',
+            'url' => 'https://cdn.discordapp.com/attachments/1/9/dance.gif',
+            'content_type' => 'image/gif',
+            'size' => 2048,
+        ]]);
 
         $media = (new \ReflectionMethod(ChatRelay::class, 'attachments'))->invoke(new ChatRelay($this->bot), $message);
 
         $this->assertCount(1, $media);
         $this->assertSame('image/gif', $media[0]->mimeType);
         $this->assertTrue($media[0]->isImage());
+    }
+
+    public function testALinkToAPictureOnDiscordsCdnIsRelayedAsThePicture(): void
+    {
+        $compose = new \ReflectionMethod(ChatRelay::class, 'compose');
+        $relay = new ChatRelay($this->bot);
+        $banner = 'https://cdn.discordapp.com/banners/211656972624199681/a_8495e8c8c8a52c8d6a6fbec68282506d.webp?size=1024&animated=true';
+
+        $alone = $compose->invoke($relay, $this->discordMessage($banner), false);
+
+        $this->assertSame('', $alone->text);
+        $this->assertSame(['https://cdn.discordapp.com/banners/211656972624199681/a_8495e8c8c8a52c8d6a6fbec68282506d.gif?size=1024'], $alone->mediaUrls());
+
+        // Said as part of a sentence, or wrapped to stop Discord showing it,
+        // it is a link and stays one.
+        foreach (['look at this ' . $banner, '<' . $banner . '>'] as $content) {
+            $said = $compose->invoke($relay, $this->discordMessage($content), false);
+
+            $this->assertSame($content, $said->text);
+            $this->assertSame([], $said->media);
+        }
     }
 
     public function testAnUnbridgedRoomGoesNowhere(): void
@@ -229,6 +245,19 @@ final class ChatRelayTest extends TestCase
         $this->alpha->receive(new Incoming('r1', 'Somebody', 'u1', 'hello', '1'));
 
         $this->assertSame([], $this->beta->relayed);
+    }
+
+    /** @param list<array<string, mixed>> $attachments */
+    private function discordMessage(string $content, array $attachments = []): \Discord\Parts\Channel\Message
+    {
+        return $this->bot->factory(\Discord\Parts\Channel\Message::class, [
+            'id' => '1',
+            'channel_id' => self::CHANNEL,
+            'content' => $content,
+            // As the gateway delivers it: decoded JSON, so an object.
+            'author' => (object) ['id' => '5', 'username' => 'somebody'],
+            'attachments' => $attachments,
+        ], true);
     }
 
     private function bridge(string $connector, string $channel, string $target): void

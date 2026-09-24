@@ -22,6 +22,7 @@ use Bridge\Connector;
 use Bridge\Message\Incoming;
 use Bridge\Message\Media;
 use Bridge\Message\Outgoing;
+use Bridge\Support\DiscordMedia;
 use Bridge\Support\MessageText;
 use Discord\Parts\Channel\Channel;
 use Discord\Parts\Channel\Message;
@@ -709,13 +710,25 @@ final class ChatRelay
 
     private function compose(Message $message, bool $edited): Outgoing
     {
+        $text = (string) $message->content;
+        $media = $this->attachments($message);
+
+        // A message that is nothing but a link to a picture on Discord's CDN —
+        // what the GIF picker sends — is that picture, as Discord shows it.
+        $linked = $media === [] ? DiscordMedia::fromUrl(trim($text)) : null;
+
+        if ($linked !== null) {
+            $text = '';
+            $media = [$linked];
+        }
+
         return new Outgoing(
             author: $this->authorName($message),
-            text: (string) $message->content,
+            text: $text,
             userNames: $this->userNames($message),
             channelNames: $this->channelNames($message),
             roleNames: $this->roleNames($message),
-            media: $this->attachments($message),
+            media: $media,
             sourceId: (string) $message->id,
             edited: $edited,
         );
