@@ -217,6 +217,16 @@ final class ChatRelayTest extends TestCase
         $this->assertTrue($media[0]->isImage());
     }
 
+    public function testADiscordMessageSaysWhereItCameFrom(): void
+    {
+        // As a Twitch or Telegram message relayed elsewhere does.
+        $compose = new \ReflectionMethod(ChatRelay::class, 'compose');
+
+        $outgoing = $compose->invoke(new ChatRelay($this->bot), $this->discordMessage('hello'), false);
+
+        $this->assertSame('somebody (discord)', $outgoing->author);
+    }
+
     public function testALinkToAPictureOnDiscordsCdnIsRelayedAsThePicture(): void
     {
         $compose = new \ReflectionMethod(ChatRelay::class, 'compose');
@@ -255,7 +265,7 @@ final class ChatRelayTest extends TestCase
             'channel_id' => self::CHANNEL,
             'content' => $content,
             // As the gateway delivers it: decoded JSON, so an object.
-            'author' => (object) ['id' => '5', 'username' => 'somebody'],
+            'author' => (object) ['id' => '5', 'username' => 'somebody', 'discriminator' => '0'],
             'attachments' => $attachments,
         ], true);
     }

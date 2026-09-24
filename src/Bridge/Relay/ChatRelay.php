@@ -18,6 +18,7 @@ use Bridge\Capability\Avatars;
 use Bridge\Capability\Editing;
 use Bridge\Capability\Media as CanSendMedia;
 use Bridge\Command\ChatDispatcher;
+use Bridge\Command\Surface;
 use Bridge\Connector;
 use Bridge\Message\Incoming;
 use Bridge\Message\Media;
@@ -723,7 +724,10 @@ final class ChatRelay
         }
 
         return new Outgoing(
-            author: $this->authorName($message),
+            // Labelled with where it came from, as a relayed Twitch or Telegram
+            // message is, so a Discord member is never taken for someone in
+            // that chat — on Twitch, every relayed line is spoken by the host.
+            author: $this->authorName($message) . ' (' . Surface::DISCORD . ')',
             text: $text,
             userNames: $this->userNames($message),
             channelNames: $this->channelNames($message),
