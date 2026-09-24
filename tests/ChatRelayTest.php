@@ -150,6 +150,55 @@ final class ChatRelayTest extends TestCase
         $this->assertSame([], $message->media);
     }
 
+    public function testAFileWithAPublicPageIsLinkedToThePage(): void
+    {
+        // A photo in a public Telegram group: no URL to the file without the
+        // token, but the post itself is public on t.me.
+        $this->bridge('alpha', self::CHANNEL, 'r1');
+        $this->bridge('beta', self::CHANNEL, 'b1');
+
+        $this->alpha->receive(new Incoming('r1', 'Somebody', 'u1', 'look', '1', media: [
+            new Media(Media::IMAGE, null, 'file-id', 'cat.jpg', link: 'https://t.me/somegroup/14'),
+        ]));
+
+        $message = $this->beta->relayed[0]['message'];
+
+        $this->assertSame('look', $message->text);
+        $this->assertSame(['https://t.me/somegroup/14'], $message->mediaUrls());
+        // A page, not a picture: a network that sends images must not try to
+        // send this as one.
+        $this->assertFalse($message->media[0]->isImage());
+    }
+
+    public function testAPageLinkThatIsNotSafeToRelayIsNamedInstead(): void
+    {
+        $this->bridge('alpha', self::CHANNEL, 'r1');
+        $this->bridge('beta', self::CHANNEL, 'b1');
+
+        $this->alpha->receive(new Incoming('r1', 'Somebody', 'u1', 'look', '1', media: [
+            new Media(Media::IMAGE, null, 'file-id', 'cat.jpg', link: 'http://t.me/somegroup/14'),
+        ]));
+
+        $this->assertSame('look 📎 cat.jpg', $this->beta->relayed[0]['message']->text);
+    }
+
+    public function testDiscordLinksThePageForAFileItCouldNotCopy(): void
+    {
+        // Too big to upload (no id to fetch by), or the download failed.
+        $render = new \ReflectionMethod(ChatRelay::class, 'renderForDiscord');
+        $relay = new ChatRelay($this->bot);
+
+        $linked = new Incoming('r1', 'Somebody', 'u1', 'look', '1', media: [
+            new Media(Media::FILE, null, null, 'talk.mp4', link: 'https://t.me/somegroup/15'),
+        ]);
+        $named = new Incoming('r1', 'Somebody', 'u1', 'look', '1', media: [
+            new Media(Media::FILE, null, null, 'talk.mp4'),
+        ]);
+
+        $this->assertSame("look\nhttps://t.me/somegroup/15", $render->invoke($relay, $linked, true, null));
+        $this->assertSame("look\n-# 📎 talk.mp4", $render->invoke($relay, $named, true, null));
+    }
+
     public function testAnUnbridgedRoomGoesNowhere(): void
     {
         $this->bridge('beta', self::CHANNEL, 'b1');

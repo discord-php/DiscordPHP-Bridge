@@ -41,6 +41,9 @@ final class Media
      * @param ?string $caption Text the platform attached to the file rather than to the message.
      * @param ?int    $size    In bytes, when the platform says — what decides whether it is
      *                         small enough to copy across rather than describe.
+     * @param ?string $link    A public page showing it — a post on t.me — for when there is
+     *                         no `url` to the file itself. What a network that can only
+     *                         carry text is given instead of the file's name.
      */
     public function __construct(
         public readonly string $kind = self::FILE,
@@ -49,6 +52,7 @@ final class Media
         public readonly ?string $name = null,
         public readonly ?string $caption = null,
         public readonly ?int $size = null,
+        public readonly ?string $link = null,
     ) {
     }
 

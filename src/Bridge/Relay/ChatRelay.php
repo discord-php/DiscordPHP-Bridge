@@ -412,7 +412,8 @@ final class ChatRelay
      *
      * Named with the network it came from, as a Discord copy is. A file only
      * the source network can open — a Telegram photo has no URL that does not
-     * carry the bot token — is named rather than linked.
+     * carry the bot token — goes as a link to the public page showing it when
+     * there is one, and is named otherwise.
      */
     private function composeFromNetwork(Connector $source, Incoming $incoming, string $key): Outgoing
     {
@@ -422,6 +423,15 @@ final class ChatRelay
         foreach ($incoming->media as $item) {
             if ($item->url !== null && MessageText::isRelayableUrl($item->url)) {
                 $media[] = $item;
+
+                continue;
+            }
+
+            // Carried like a file's own link, so a text-only network shows it
+            // the same way. As a file, not an image: it is a page, and a
+            // network that sends pictures must link it rather than post it.
+            if ($item->link !== null && MessageText::isRelayableUrl($item->link)) {
+                $media[] = new Media(Media::FILE, $item->link, name: $item->name, caption: $item->caption);
 
                 continue;
             }
@@ -617,7 +627,9 @@ final class ChatRelay
      *
      * A connector hands over `null` for the URL when the only link it could
      * produce carries a credential — a Telegram file URL has the bot token in
-     * its path — so this never leaks one into a channel.
+     * its path — so this never leaks one into a channel. A public page showing
+     * the file is the next best thing: reached when a file was too big to copy
+     * across, or the copy failed.
      */
     private function describeMedia(Media $item): string
     {
@@ -625,6 +637,10 @@ final class ChatRelay
 
         if ($item->url !== null && MessageText::isRelayableUrl($item->url)) {
             return $item->url;
+        }
+
+        if ($item->link !== null && MessageText::isRelayableUrl($item->link)) {
+            return $item->link;
         }
 
         return sprintf('-# 📎 %s', MessageText::escapeMarkdown($name));
