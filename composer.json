@@ -20,7 +20,7 @@
     ],
     "require": {
         "php": "^8.4",
-        "discord-php/http": "dev-master as 10.1.7",
+        "discord-php/http": "dev-master as 10.9.8",
         "psr/log": "^1.0 || ^2.0 || ^3.0",
         "react/event-loop": "^1.5",
         "react/filesystem": "^0.2@dev",
