@@ -29,7 +29,9 @@ use Bridge\Relay\OutboundPacer;
 use Bridge\Relay\WebhookDelivery;
 use Bridge\Support\BridgeCheck;
 use Bridge\Support\CommandSync;
+use Bridge\Support\ConnectionAlerts;
 use Bridge\Support\InstallCheck;
+use Discord\Builders\MessageBuilder;
 use Discord\MessageCommandClient;
 use Discord\Parts\Channel\Channel;
 use Discord\Parts\Interactions\Interaction;
@@ -110,6 +112,8 @@ class Bot extends MessageCommandClient
 
     private readonly Cooldowns $cooldowns;
 
+    private readonly ConnectionAlerts $connectionAlerts;
+
     /** Every top-level slash command this build defines; see {@see Support\CommandSync}. */
     private array $declared = [];
 
@@ -162,6 +166,11 @@ class Bot extends MessageCommandClient
             BridgeActions::CONFIRM_RESET,
             fn (Interaction $interaction, array $args) => BridgeActions::confirmed($this, $interaction, (string) ($args[0] ?? '')),
         );
+
+        // A connection that will not come back by itself is DMed to the
+        // owner, with a button that tries again.
+        $this->connectionAlerts = new ConnectionAlerts($this);
+        $this->connectionAlerts->register();
 
         // Who can add the bot is decided in the Developer Portal, and nothing
         // there warns when it is left open. DiscordPHP fetches the settings
@@ -364,17 +373,37 @@ class Bot extends MessageCommandClient
      */
     public function notifyOwner(string $markdown): void
     {
+        $this->messageOwner($markdown)->then(null, fn (\Throwable $e) => $this->logger->error(
+            '[bridge] could not DM the owner: ' . $e->getMessage(),
+        ));
+    }
+
+    /**
+     * DMs the owner, when one is configured, and hands back the message so it
+     * can be edited later.
+     *
+     * @return PromiseInterface<\Discord\Parts\Channel\Message|null> Null when
+     *                                                              there is no
+     *                                                              owner.
+     */
+    public function messageOwner(MessageBuilder|string $message): PromiseInterface
+    {
         $ownerId = $this->config->discordOwnerId;
 
         if ($ownerId === null || $ownerId === '') {
-            return;
+            return resolve(null);
         }
 
-        $this->users->fetch($ownerId)->then(
-            fn ($user) => $user->sendMessage($markdown),
-        )->then(null, fn (\Throwable $e) => $this->logger->error(
-            '[bridge] could not DM the owner: ' . $e->getMessage(),
-        ));
+        return $this->users->fetch($ownerId)->then(fn ($user) => $user->sendMessage($message));
+    }
+
+    /**
+     * Where a connector reports its connection going for good and coming back;
+     * see {@see Capability\Reconnects}.
+     */
+    public function connectionAlerts(): ConnectionAlerts
+    {
+        return $this->connectionAlerts;
     }
 
     /**

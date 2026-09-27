@@ -50,8 +50,15 @@ final class TwitchConnector implements Connector, ProvidesActions
 Optional interfaces say what the network can do, so the relay asks instead of
 assuming: `Capability\Editing` (rewrite a relayed message), `Capability\Media`
 (carry a picture, and hand over a file's bytes for Discord), `Capability\Avatars`
-(a sender's picture for the Discord copy), `Capability\ProvidesActions` and
-`Capability\ProvidesModules`.
+(a sender's picture for the Discord copy), `Capability\Reconnects` (a
+connection that can be tried again on request), `Capability\ProvidesActions`
+and `Capability\ProvidesModules`.
+
+A connector that keeps a connection open does its own retrying. When that stops
+working, it tells `$bot->connectionAlerts()->failed()`, and the owner gets a DM
+with a **Reconnect now** button that calls `Reconnects::reconnect()`. It tells
+`restored()` when the connection is back, which turns the same DM into a note
+saying so. The DM never quotes the error; that stays in the log.
 
 `start()` returning a promise is not a formality. A connector that rejects is
 logged, reported to the owner, left out of the startup check, and stops the
@@ -229,7 +236,7 @@ src/Bridge/
   Store.php  Links.php         persistence, and the routing table
   Room.php
   Actions/                     the six bridge verbs, and /bridge
-  Capability/                  Editing, Media, ProvidesActions, ProvidesModules
+  Capability/                  Editing, Media, Reconnects, ProvidesActions, ProvidesModules
   Command/                     Action, Context, Access, Surface, and the adapters
   Message/                     Incoming, Outgoing, Media
   Relay/                       both directions, webhooks, pacing, edit mapping
