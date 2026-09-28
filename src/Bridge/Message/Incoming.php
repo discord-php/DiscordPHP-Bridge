@@ -28,6 +28,11 @@ namespace Bridge\Message;
  * what IRC cannot carry and what Telegram's HTML mode cannot carry are
  * different sets.
  *
+ * It can also be a notice that something is gone ({@see $deleted}): a message
+ * deleted where it was said, or everything an author said, after a ban. The
+ * relay then removes the Discord copies it still remembers. Build those with
+ * {@see deletion()} and {@see purge()}.
+ *
  * @author Valithor Obsidion <valithor@discordphp.org>
  */
 final class Incoming
@@ -45,6 +50,8 @@ final class Incoming
      * @param ?string      $handle    The author's login or username, where the network
      *                                has one distinct from the display name — what an
      *                                avatar lookup is keyed by.
+     * @param bool         $deleted   Not a message but a notice that one is gone: the one with
+     *                                `$id`, or with no id, everything recent by `$authorId`.
      */
     public function __construct(
         public readonly string $target,
@@ -57,12 +64,32 @@ final class Incoming
         public readonly bool $edited = false,
         public readonly bool $own = false,
         public readonly ?string $handle = null,
+        public readonly bool $deleted = false,
     ) {
     }
 
-    /** Whether there is anything at all worth relaying. */
+    /**
+     * The message with this id was deleted where it was said, so its Discord
+     * copies go too.
+     */
+    public static function deletion(string $target, string $id): self
+    {
+        return new self($target, '', id: $id, deleted: true);
+    }
+
+    /**
+     * Everything this author said in the room recently is to go: they were
+     * banned, and what they said with it. Only what the relay still remembers
+     * can be found, which is the recent past.
+     */
+    public static function purge(string $target, string $authorId, string $author = ''): self
+    {
+        return new self($target, $author, authorId: $authorId, deleted: true);
+    }
+
+    /** Whether there is anything at all worth relaying. A deletion never is. */
     public function isEmpty(): bool
     {
-        return ($this->text === null || trim($this->text) === '') && $this->media === [];
+        return $this->deleted || (($this->text === null || trim($this->text) === '') && $this->media === []);
     }
 }

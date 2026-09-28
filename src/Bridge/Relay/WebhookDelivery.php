@@ -54,7 +54,7 @@ use function React\Promise\resolve;
  *
  * @author Valithor Obsidion <valithor@discordphp.org>
  */
-final class WebhookDelivery
+final class WebhookDelivery implements Delivery
 {
     /** Discord rejects a webhook username longer than this. */
     public const USERNAME_LIMIT = 80;
@@ -147,6 +147,31 @@ final class WebhookDelivery
                         $this->body(sprintf('**%s%s:** %s', self::escape($author), $suffix, $text)),
                     ),
                 ),
+        );
+    }
+
+    /**
+     * Removes a copy this delivery posted: the original was deleted on its
+     * network, or its author was banned there.
+     *
+     * A webhook message is deleted through the webhook that posted it, with
+     * the webhook's token, which needs no permission; a fallback message is
+     * the bot's own, which it may always delete. Through the pacer, like
+     * everything else that spends the channel's budget.
+     *
+     * @return PromiseInterface<null>
+     */
+    public function delete(Channel $channel, string $messageId, string $via): PromiseInterface
+    {
+        return $this->pacer->enqueue(
+            (string) $channel->id,
+            fn (): PromiseInterface => (
+                $via === self::VIA_WEBHOOK
+                ? $this->webhookFor($channel)->then(
+                    static fn (Webhook $webhook): PromiseInterface => $webhook->messages->delete($messageId),
+                )
+                : $channel->messages->delete($messageId)
+            )->then(static fn (): mixed => null),
         );
     }
 

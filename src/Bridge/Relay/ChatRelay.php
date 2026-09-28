@@ -65,12 +65,24 @@ use function React\Promise\resolve;
  * would relay every message with a link in it twice. So an update is acted on
  * only when the text or the attachments actually changed.
  *
+ * ## Deletions
+ *
+ * A connector reports a message deleted, or an author banned, with an
+ * {@see Incoming} that is a deletion notice. The Discord copies the relay
+ * still remembers are removed, and nothing else happens: a copy relayed to
+ * another *network* stays, because most cannot unsay a line, and one that can
+ * is still not this bridge's to moderate. Only the recent past is remembered,
+ * as for edits.
+ *
  * @author Valithor Obsidion <valithor@discordphp.org>
  */
 final class ChatRelay
 {
     /** How many relayed messages to remember for editing, per direction. */
     public const REMEMBER = 500;
+
+    /** How many of one author's messages a purge can still find. */
+    public const PER_AUTHOR = 50;
 
     /** @var MessageMap "connector:discordId" => the id it was given on that network */
     private readonly MessageMap $sent;
@@ -81,14 +93,30 @@ final class ChatRelay
     /** @var MessageMap "connector:room:id" => list of Discord copies it became */
     private readonly MessageMap $delivered;
 
+    /** @var MessageMap "connector:room:author:authorId" => the keys of their messages in $delivered, oldest first */
+    private readonly MessageMap $byAuthor;
+
     /** @var array<string, ChatDispatcher> connector name => its command matcher */
     private array $commands = [];
 
-    public function __construct(private readonly Bot $bot, int $remember = self::REMEMBER)
-    {
+    /**
+     * @param ?Delivery $delivery How messages get into Discord. The bot's own
+     *                            {@see WebhookDelivery} unless a test says otherwise.
+     */
+    public function __construct(
+        private readonly Bot $bot,
+        int $remember = self::REMEMBER,
+        private readonly ?Delivery $delivery = null,
+    ) {
         $this->sent = new MessageMap($remember);
         $this->seen = new MessageMap($remember);
         $this->delivered = new MessageMap($remember);
+        $this->byAuthor = new MessageMap($remember);
+    }
+
+    private function delivery(): Delivery
+    {
+        return $this->delivery ?? $this->bot->delivery();
     }
 
     /** Attaches both directions. Call once; nothing arrives until a connector starts. */
@@ -307,10 +335,20 @@ final class ChatRelay
 
     private function fromConnector(Connector $connector, Incoming $incoming): void
     {
+        if ($incoming->own) {
+            return;
+        }
+
+        if ($incoming->deleted) {
+            $this->deleteInDiscord($connector, $incoming);
+
+            return;
+        }
+
         // The connector has already dropped its own echo; commands are dropped
         // here so they are answered without also being broadcast. Recognised by
         // *that network's* prefix, which need not be Discord's.
-        if ($incoming->own || $incoming->isEmpty()) {
+        if ($incoming->isEmpty()) {
             return;
         }
 
@@ -502,7 +540,7 @@ final class ChatRelay
                 continue;
             }
 
-            $this->bot->delivery()
+            $this->delivery()
                 ->edit($channel, $copy['message_id'], $copy['via'], $incoming->author, $text, $this->suffix($connector))
                 ->then(null, fn (\Throwable $e) => $this->bot->getLogger()->debug(
                     '[relay] could not edit the copy in ' . $copy['channel_id'] . ': ' . $e->getMessage(),
@@ -510,6 +548,63 @@ final class ChatRelay
         }
 
         return true;
+    }
+
+    /**
+     * Removes the Discord copies of a message deleted on its network, or of
+     * everything recent by an author banned there.
+     */
+    private function deleteInDiscord(Connector $connector, Incoming $incoming): void
+    {
+        if ($incoming->id !== null) {
+            $keys = [self::incomingKey($connector, $incoming)];
+        } elseif ($incoming->authorId !== null) {
+            $authorKey = self::authorKey($connector, $incoming->target, $incoming->authorId);
+            $keys = $this->byAuthor->lookup($authorKey);
+            $keys = is_array($keys) ? $keys : [];
+            $this->byAuthor->forget($authorKey);
+        } else {
+            return;
+        }
+
+        foreach ($keys as $key) {
+            $copies = $this->delivered->lookup($key);
+
+            if (! is_array($copies)) {
+                continue;
+            }
+
+            $this->delivered->forget($key);
+
+            foreach ($copies as $copy) {
+                $channel = $this->bot->getChannel($copy['channel_id']);
+
+                if (! $channel instanceof Channel) {
+                    continue;
+                }
+
+                $this->delivery()
+                    ->delete($channel, $copy['message_id'], $copy['via'])
+                    ->then(null, fn (\Throwable $e) => $this->bot->getLogger()->debug(
+                        '[relay] could not delete the copy in ' . $copy['channel_id'] . ': ' . $e->getMessage(),
+                    ));
+            }
+        }
+    }
+
+    /** Files a delivered message under its author, so a ban can find it. */
+    private function rememberAuthor(Connector $connector, Incoming $incoming, string $key): void
+    {
+        if ($incoming->authorId === null) {
+            return;
+        }
+
+        $authorKey = self::authorKey($connector, $incoming->target, $incoming->authorId);
+        $keys = $this->byAuthor->lookup($authorKey);
+        $keys = is_array($keys) ? array_values(array_diff($keys, [$key])) : [];
+        $keys[] = $key;
+
+        $this->byAuthor->remember($authorKey, array_slice($keys, -self::PER_AUTHOR));
     }
 
     /**
@@ -523,7 +618,7 @@ final class ChatRelay
         ?string $avatar,
         ?array $file,
     ): void {
-        $this->bot->delivery()
+        $this->delivery()
             ->deliver($channel, $incoming->author, $text, $avatar, $this->suffix($connector), $file)
             ->then(
                 function (array $copy) use ($connector, $incoming, $channel): void {
@@ -537,6 +632,7 @@ final class ChatRelay
                     $copies[] = $copy + ['channel_id' => (string) $channel->id];
 
                     $this->delivered->remember($key, $copies);
+                    $this->rememberAuthor($connector, $incoming, $key);
                 },
                 function (\Throwable $e) use ($channel): void {
                     $this->bot->getLogger()->warning('[relay] delivery to ' . $channel->id . ' failed: ' . $e->getMessage());
@@ -545,7 +641,7 @@ final class ChatRelay
                     // us, every later message would otherwise keep failing
                     // against the same dead handle; forgetting it means the
                     // next one recreates.
-                    $this->bot->delivery()->forget($channel);
+                    $this->delivery()->forget($channel);
                 },
             );
     }
@@ -707,6 +803,12 @@ final class ChatRelay
     private static function incomingKey(Connector $connector, Incoming $incoming): string
     {
         return $connector->name() . ':' . $incoming->target . ':' . (string) $incoming->id;
+    }
+
+    /** Where an author's messages are filed, within one room. */
+    private static function authorKey(Connector $connector, string $target, string $authorId): string
+    {
+        return $connector->name() . ':' . $target . ':author:' . $authorId;
     }
 
     private function compose(Message $message, bool $edited): Outgoing

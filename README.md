@@ -60,6 +60,17 @@ with a **Reconnect now** button that calls `Reconnects::reconnect()`. It tells
 `restored()` when the connection is back, which turns the same DM into a note
 saying so. The DM never quotes the error; that stays in the log.
 
+A deletion comes in as an `Incoming` too: `Incoming::deletion($room, $id)` for
+a message deleted where it was said, and `Incoming::purge($room, $authorId)` for
+everything recent by someone banned there. The relay removes the Discord copies
+it still remembers. Copies it relayed to other networks stay.
+
+A network that goes live can announce it with
+[`Support\LiveAnnouncer`](src/Bridge/Support/LiveAnnouncer.php): hand it who is
+bridged, who is live, how to post and the stream's link. It says "live" once and
+"ended" once, not twice for a restart or for an encoder that drops for a moment,
+and it keeps what it announced on disk. Twitch and YouTube both use it.
+
 `start()` returning a promise is not a formality. A connector that rejects is
 logged, reported to the owner, left out of the startup check, and stops the
 command prune pass — so a network that failed to come up cannot get its
@@ -239,10 +250,11 @@ src/Bridge/
   Capability/                  Editing, Media, Reconnects, ProvidesActions, ProvidesModules
   Command/                     Action, Context, Access, Surface, and the adapters
   Message/                     Incoming, Outgoing, Media
-  Relay/                       both directions, webhooks, pacing, edit mapping
+  Relay/                       both directions, webhooks, pacing, edit and delete mapping
   Builders/  Helpers/          Components v2, custom_id routing
   Modules/                     the escape hatch from a string-in string-out action
-  Support/                     text, permissions, async disk I/O, the startup check
+  Support/                     text, permissions, async disk I/O, the startup check,
+                               connection alerts, live announcements
 ```
 
 The logic worth testing is deliberately pure — routing, parsing, sanitisation,
