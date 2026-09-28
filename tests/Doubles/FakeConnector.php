@@ -53,6 +53,9 @@ final class FakeConnector implements Connector, ProvidesActions
     /** Whether {@see start()} should reject, for testing a network that will not come up. */
     public bool $failToStart = false;
 
+    /** What {@see resolve()} rejects with, for testing a room the connector refuses or cannot reach. */
+    public ?\Throwable $refuse = null;
+
     /** @var list<callable(Incoming): void> */
     private array $handlers = [];
 
@@ -145,6 +148,10 @@ final class FakeConnector implements Connector, ProvidesActions
 
     public function resolve(string $target): PromiseInterface
     {
+        if ($this->refuse !== null) {
+            return reject($this->refuse);
+        }
+
         return resolve(in_array($target, $this->rooms, true)
             ? new Room($target, ucfirst($target), 'https://example.test/' . $target)
             : null);

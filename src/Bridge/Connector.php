@@ -147,6 +147,10 @@ interface Connector
      * A lookup that *failed* is not proof a room is gone: reject, or resolve to
      * a {@see Room}, rather than resolving to `null` on a network error.
      *
+     * A room that exists but that this connector will not bridge rejects with
+     * a {@see \Bridge\Command\ActionError} saying why, which `link` shows to
+     * whoever asked. Any other rejection is logged, not shown.
+     *
      * @return PromiseInterface<?Room>
      */
     public function resolve(string $target): PromiseInterface;

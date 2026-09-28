@@ -175,9 +175,15 @@ final class BridgeActions implements ProvidesActions
                 );
             },
             function (\Throwable $e) use ($context, $target): never {
-                // Logged, not quoted. The reply is public, and an error from
-                // another network's client is not guaranteed to be free of
-                // the request that caused it.
+                // A connector that refuses the room for a reason of its own
+                // says so in words written for whoever asked.
+                if ($e instanceof ActionError) {
+                    throw $e;
+                }
+
+                // Anything else is logged, not quoted. The reply is public, and
+                // an error from another network's client is not guaranteed to
+                // be free of the request that caused it.
                 $context->bot->getLogger()->warning(sprintf(
                     '[%s] could not look up %s to link it: %s',
                     $this->connector->name(),
