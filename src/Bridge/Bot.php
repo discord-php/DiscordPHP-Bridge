@@ -189,6 +189,19 @@ class Bot extends MessageCommandClient
     // ── Wiring ─────────────────────────────────────────────────────────
 
     /**
+     * Reuse DiscordPHP's resolved Windows nameserver for bridge transports.
+     * Do not copy Discord-specific TLS, timeout or address-family settings.
+     *
+     * @return array{dns?: non-empty-string}
+     */
+    public function windowsDnsSocketOptions(): array
+    {
+        $dns = $this->options['socket_options']['dns'] ?? null;
+
+        return PHP_OS_FAMILY === 'Windows' && is_string($dns) && $dns !== '' ? ['dns' => $dns] : [];
+    }
+
+    /**
      * Installs a connector.
      *
      * Booted straight away rather than at `ready`, because whatever it
